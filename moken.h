@@ -1,8 +1,11 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 
 namespace moken {
+
+	constexpr size_t table_width = (unsigned char)-1;
 
 	void report_error(const char *message) noexcept;
 
@@ -101,6 +104,7 @@ namespace moken {
 					if (is_inside_bracket_expression) { break; }
 					result++;
 					break;
+					// TODO: Give this code another look through.
 				}
 			}
 		};
@@ -109,48 +113,66 @@ namespace moken {
 		return result;
 	}
 
+	enum class token_type_t : uint8_t {
+		TABLE_ROW,
+		ALTERNATION,
+		KLEENE_CLOSURE,
+		SUBEXPRESSION_BEGIN,
+		SUBEXPRESSION_END
+	};
+
+	struct token_t {
+		token_type_t type;
+		bool table_row[table_width];
+	};
+	
 	struct dfa_table_element_t {
 		const dfa_table_element_t *next;
 	};
 
+	consteval void superimpose_table_row(dfa_table_element_t (&table)[table_length], const bool (&row)[table_width], size_t current_row, size_t (&new_current_rows)[table_width], size_t table_head_row) {
+		for (size_t i = 0; i < table_width; i++) {
+			dfa_table_element_t& element = table[current_row * table_width + i];
+			if (element.next == nullptr) {
+				element.next = table_head_row;
+				new_current_rows[i] = table_head_row;
+				continue;
+			}
+			new_current_rows[i] = element.next;
+		}
+	}
+
 	template <array_container_t specification_container, size_t table_length>
 	consteval void fill_dfa_table_relatively(dfa_table_element_t (&table)[table_length]) {
-		constexpr size_t table_width = (unsigned char)-1;
-
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: Same work-around as above.
 		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
 		constexpr size_t spec_length = decltype(specification_container)::length - 1;	// NOTE: Accounting for null-termination character. We could remove it, but for simplicity's sake, we're leaving it in the actual array, at least for now.
 
-		size_t i = 0;
-		size_t current_row = 0;
-		bool is_inside_bracket_expression = false;
-
 		// NOTE: constexpr instead of consteval, for same reason as above.
-		auto func_implementation = [&i, &current_row, &is_inside_bracket_expression](size_t nesting_depth, size_t base_row, const auto& self) constexpr -> void {
+		auto func_implementation = [](size_t token_array_index, size_t current_row, const auto& self) constexpr -> bool {
 			for (; i < spec_length; i++) {
-				unsigned char character = specification[i];
-				switch (character) {
+				token_t token = specification[token_array_index];
+				switch (token.type) {
 				case '|':
-					current_row = base_row;
-					// TODO: implement
-					break;
+					return true;
 				case '*':
 					// TODO: implement
 					break;
-				case '[':
+				/*case '[':
 					is_inside_bracket_expression = true;
 					break;
 				case ']':
 					is_inside_bracket_expression = false;
 					current_row++;
-					break;
+					// TODO: recurse
+					break; */			// TODO: Remove these when you've got tokenizer for the regex running, which removes the brackets and creates tokens of rows associated with each letter. Alternations and co will be separate special tokens.
 				case '(':
 					i++;
-					self(nesting_depth + 1, current_row, self);		// TODO: Do we need the nesting_depth variable in this instance of the parser?
+					while (self(current_row, self)) { }
 					break;
 				case ')':
-					return;
+					return false;
 				case '\\':
 					table[current_row * table_width + (unsigned char)(specification[i + 1])].next = ++current_row;
 					i++;
@@ -158,13 +180,25 @@ namespace moken {
 				default:
 					if (is_inside_bracket_expression) { table[current_row * table_width + character].next = current_row + 1; break; }
 					// TODO: Is the order okay here with the ++current_row stuff, because both sides contain it.
-					table[current_row * table_width + character].next = ++current_row;
-					// TODO: Make this part of the code path aware, so that it doesn't overwrite existing paths through the table, but instead forks if necessary.
-					break;
+					//table[current_row * table_width + character].next = ++current_row;
+
+					size_t new_current_rows[table_width];
+
+					bool row[table_width] { };
+					row[character] = true;
+
+					superimpose_table_row(table, row, current_row, new_current_rows, table_head_row);
+
+					for (size_t j = 0; j < table_width - 1; j++) {
+						func_implementation(base_row, new_current_rows[i], self);
+						// TODO: Keep this from going exponential by implementing a grouping algorithm.
+					}
+					return func_implementation(base_row, new_current_rows[i], self);
 				}
 			}
+			return false;
 		};
-		func_implementation(0, 0, func_implementation);
+		while (func_implementation(0, 0, 0, func_implementation) { }
 	}
 
 	template <array_container_t specification>
