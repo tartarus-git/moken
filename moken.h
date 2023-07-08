@@ -16,7 +16,7 @@ namespace moken {
 
 		element_t data[length];
 
-		consteval array_container_t(const element_t (&source_array)[array_length]) {
+		consteval array_container_t(const element_t (&source_array)[array_length]) {		// TODO: Consider making this even more general so that many different types could be accepted, std::string, etc...
 			for (size_t i = 0; i < length; i++) { data[i] = source_array[i]; }
 		}
 
@@ -125,6 +125,75 @@ namespace moken {
 		token_type_t type;
 		bool table_row[table_width];
 	};
+
+	template <array_container_t specification_container>
+	consteval size_t calculate_token_array_length() {
+		using spec_element_t = typename decltype(specification_container)::type;
+		// NOTE: Same work-around as above.
+		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
+		constexpr size_t spec_length = decltype(specification_container)::length - 1;	// NOTE: Accounting for null-termination character. We could remove it, but for simplicity's sake, we're leaving it in the actual array, at least for now.
+
+		size_t result = 0;
+
+		for (size_t i = 0; i < spec_length; i++) {
+			spec_element_t character = specification[i];		// TODO: You need to use a type traits make unsigned type of thing here, or else UB when using it as array index.
+
+			switch (character) {
+			case '|': result++; break;
+			case '*': result++; break;
+			case '(': result++; break;
+			case ')': result++; break;
+			case '[':			// TODO: We're using equalities with normal character values in the switch statement, even though the spec_element_t is pretty general. Are there any cases where this wouldn't work? What should we do?
+				result++;
+				i++;
+				for (; specification[i] != ']'; i++) { }
+				break;
+			default: result++; break;
+			}
+		}
+
+		// TODO: Make sure all these mechanisms handle 0 length regex specifications correctly and specifications like "()" and stuff like that.
+		return result;
+	}
+
+	template <array_container_t specification_container>
+	consteval auto tokenize_specification() {
+		using spec_element_t = typename decltype(specification_container)::type;
+		// NOTE: Same work-around as above.
+		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
+		constexpr size_t spec_length = decltype(specification_container)::length - 1;	// NOTE: Accounting for null-termination character. We could remove it, but for simplicity's sake, we're leaving it in the actual array, at least for now.
+
+		array_container_t<token_t, calculate_token_array_length<specification_container>()> token_array;
+
+		size_t token_array_index = 0;
+
+		for (size_t i = 0; i < spec_length; i++) {
+			spec_element_t character = specification[i];		// TODO: You need to use a type traits make unsigned type of thing here, or else UB when using it as array index.
+
+			switch (character) {
+			case '|': token_array[token_array_index++].type = token_type_t::ALTERNATION; break;
+			case '*': token_array[token_array_index++].type = token_type_t::KLEENE_CLOSURE; break;
+				  // TODO: Redo kleene closure stuff to give token spans instead of actual kleene closure token, like below.
+			case '(': token_array[token_array_index++].type = token_type_t::SUBEXPRESSION_BEGIN; break;
+			case ')': token_array[token_array_index++].type = token_type_t::SUBEXPRESSION_END; break;
+			case '[':
+				token_t& token = token_array[token_array_index++];
+				token.type = token_type_t::TABLE_ROW;
+				parse_bracket_expression<specification_container>(++i, token.table_row);
+				break;
+				// TODO: add the backslash stuff
+			default:
+				token_t& token = token_array[token_array_index++];
+				token.type = token_type_t::TABLE_ROW;
+				for (size_t j = 0; j < character; j++) { token.table_row[j] = false; }
+				token.table_row[character] = true;
+				for (size_t j = character + 1; j < table_width; j++) { token.table_row[j] = false; }
+				break;
+			}
+		}
+
+		return token_array;
+	}
 	
 	struct dfa_table_element_t {
 		const dfa_table_element_t *next;
@@ -142,63 +211,59 @@ namespace moken {
 		}
 	}
 
-	template <array_container_t specification_container, size_t table_length>
+	template <array_container_t token_array_container, size_t table_length>
 	consteval void fill_dfa_table_relatively(dfa_table_element_t (&table)[table_length]) {
-		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: Same work-around as above.
-		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
-		constexpr size_t spec_length = decltype(specification_container)::length - 1;	// NOTE: Accounting for null-termination character. We could remove it, but for simplicity's sake, we're leaving it in the actual array, at least for now.
+		const token_t (&token_array)[decltype(token_array_container)::length] = token_array_container.data;
+		constexpr size_t token_array_length = decltype(token_array_container)::length;
+
+		size_t token_array_index = 0;		// TODO: Put this back in as parameter to the function or else none of this is gonna work.
 
 		// NOTE: constexpr instead of consteval, for same reason as above.
-		auto func_implementation = [](size_t token_array_index, size_t current_row, const auto& self) constexpr -> bool {
-			for (; i < spec_length; i++) {
-				token_t token = specification[token_array_index];
+		auto func_implementation = [&token_array_index](size_t current_row, size_t superimposition_target_row, const auto& self) constexpr -> bool {
+			for (; token_array_index < token_array_length; token_array_index++) {
+				token_t token = token_array[token_array_index];
 				switch (token.type) {
-				case '|':
-					return true;
-				case '*':
-					// TODO: implement
-					break;
-				/*case '[':
-					is_inside_bracket_expression = true;
-					break;
-				case ']':
-					is_inside_bracket_expression = false;
-					current_row++;
-					// TODO: recurse
-					break; */			// TODO: Remove these when you've got tokenizer for the regex running, which removes the brackets and creates tokens of rows associated with each letter. Alternations and co will be separate special tokens.
+				case token_type_t::ALTERNATION: return true;
 				case '(':
-					i++;
+					token_array_index++;
 					while (self(current_row, self)) { }
 					break;
 				case ')':
 					return false;
-				case '\\':
-					table[current_row * table_width + (unsigned char)(specification[i + 1])].next = ++current_row;
-					i++;
-					break;
-				default:
-					if (is_inside_bracket_expression) { table[current_row * table_width + character].next = current_row + 1; break; }
-					// TODO: Is the order okay here with the ++current_row stuff, because both sides contain it.
-					//table[current_row * table_width + character].next = ++current_row;
+				case token_type_t::TABLE_ROW:
+					// TODO: research order of execution with = operator. The stuff on the left gets evaluated first right, and then the stuff on the right? Very sure that's how it works.
 
 					size_t new_current_rows[table_width];
 
-					bool row[table_width] { };
-					row[character] = true;
-
-					superimpose_table_row(table, row, current_row, new_current_rows, table_head_row);
+					superimpose_table_row(table, token.table_row, current_row, new_current_rows, superimposition_target_row);
 
 					for (size_t j = 0; j < table_width - 1; j++) {
-						func_implementation(base_row, new_current_rows[i], self);
+						func_implementation(new_current_rows[i], kleene_base, self);
 						// TODO: Keep this from going exponential by implementing a grouping algorithm.
 					}
-					return func_implementation(base_row, new_current_rows[i], self);
+					return func_implementation(new_current_rows[i], kleene_base, self);
+
+				case token_type_t::KLEENE_CLOSURE_TABLE_ROW:
+
+					size_t new_current_rows[table_width];
+
+					if (superimpose_table_row(table, token.table_row, current_row, new_current_rows, superimposition_target_row) == true) { return false; }
+					// TODO: Add KLEENE_CLOSURE_TABLE_BEGIN and END type tokens. They should set the base and then start the process of connecting to the base respectively.
+					// Maybe don't have KLEENE_CLOSURE_TABLE_ROW and the END things, and simply set a bool when START is encountered. That bool will be set back to false once an escape route back to the kleene base is found.
+					// After connecting to the kleene base, we return, and the KLEENE START token thing should catch that and then skip to the next relevant tokens using the return value that's propagated back up.
+					// A surrounding kleene closure bool and kleene base can then be used, since it's stored on that level of the stack, and the process can be done again if necessary. This makes kleenes nestable, which is imperative.
+
+					for (size_t j = 0; j < table_width - 1; j++) {
+						func_implementation(new_current_rows[i], kleene_base, self);
+						// TODO: Keep this from going exponential by implementing a grouping algorithm.
+					}
+					return func_implementation(new_current_rows[i], kleene_base, self);
 				}
 			}
 			return false;
 		};
-		while (func_implementation(0, 0, 0, func_implementation) { }
+		while (func_implementation(0, 0, func_implementation) { }
 	}
 
 	template <array_container_t specification>
@@ -207,7 +272,8 @@ namespace moken {
 		dfa_table_element_t table[table_length * (unsigned char)-1];
 
 		consteval relative_untrimmed_tokenizer_t() {
-			fill_dfa_table_relatively<specification>(table);
+			constexpr auto token_array = tokenize_specification<specification>();
+			fill_dfa_table_relatively<token_array>(table);
 		}
 	};
 
