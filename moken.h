@@ -217,42 +217,43 @@ namespace moken {
 		const token_t (&token_array)[decltype(token_array_container)::length] = token_array_container.data;
 		constexpr size_t token_array_length = decltype(token_array_container)::length;
 
-		size_t token_array_index = 0;		// TODO: Put this back in as parameter to the function or else none of this is gonna work.
-
 		// NOTE: constexpr instead of consteval, for same reason as above.
-		auto func_implementation = [&token_array_index](size_t current_row, size_t superimposition_target_row, const auto& self) constexpr -> bool {
+		auto func_implementation = [&token_array_index](size_t kleene_token_start_index, size_t token_array_index, size_t current_row, size_t kleene_start_row, size_t superimposition_target_row, const auto& self) constexpr -> size_t {
 			for (; token_array_index < token_array_length; token_array_index++) {
 				token_t token = token_array[token_array_index];
 				switch (token.type) {
 				case token_type_t::ALTERNATION: return true;
-				case '(':
+				case token_type_t::SUBEXPRESSION_BEGIN:
 					token_array_index++;
-					while (self(current_row, self)) { }
+					size_t new_token_array_index = token_array_index;
+					while (new_token_array_index = self(new_token_array_index, current_row, self)) { }
 					break;
-				case ')':
+				case token_type_t::SUBEXPRESSION_END:
 					return false;
+
+				case token_type_t::KLEENE_CLOSURE_END:
+					size_t new_current_rows[table_width];
+					superimpose_table_row(table, token.table_row, current_row, new_current_rows, superimposition_target_row);
+
+					bool return_value = false;
+					for (size_t j = 0; j < table_width; j++) {
+						if (new_current_rows[j].next != superimposition_target_row) {
+							return_value = self(kleene_token_start_index, kleene_token_start_index, new_current_rows[j], kleene_start_row, kleene_start_row, self);
+						}
+					}
+
+					return token_array_index + 1;
+
+				case token_type_t::KLEENE_CLOSURE_START:		// TODO: insert this before start of kleene thing, so there is no row associated with it, easier for this code
+					size_t return_value = self(/* same stuff but new kleene base veriables */);
+					return self(/* same stuff (old kleene base variables, but new current token variables) */);
+
 				case token_type_t::TABLE_ROW:
 					// TODO: research order of execution with = operator. The stuff on the left gets evaluated first right, and then the stuff on the right? Very sure that's how it works.
 
 					size_t new_current_rows[table_width];
 
-					superimpose_table_row(table, token.table_row, current_row, new_current_rows, superimposition_target_row);
-
-					for (size_t j = 0; j < table_width - 1; j++) {
-						func_implementation(new_current_rows[i], kleene_base, self);
-						// TODO: Keep this from going exponential by implementing a grouping algorithm.
-					}
-					return func_implementation(new_current_rows[i], kleene_base, self);
-
-				case token_type_t::KLEENE_CLOSURE_TABLE_ROW:
-
-					size_t new_current_rows[table_width];
-
-					if (superimpose_table_row(table, token.table_row, current_row, new_current_rows, superimposition_target_row) == true) { return false; }
-					// TODO: Add KLEENE_CLOSURE_TABLE_BEGIN and END type tokens. They should set the base and then start the process of connecting to the base respectively.
-					// Maybe don't have KLEENE_CLOSURE_TABLE_ROW and the END things, and simply set a bool when START is encountered. That bool will be set back to false once an escape route back to the kleene base is found.
-					// After connecting to the kleene base, we return, and the KLEENE START token thing should catch that and then skip to the next relevant tokens using the return value that's propagated back up.
-					// A surrounding kleene closure bool and kleene base can then be used, since it's stored on that level of the stack, and the process can be done again if necessary. This makes kleenes nestable, which is imperative.
+					superimpose_table_row(table, token.table_row, current_row, new_current_rows, superimposition_target_row + 1);
 
 					for (size_t j = 0; j < table_width - 1; j++) {
 						func_implementation(new_current_rows[i], kleene_base, self);
