@@ -199,12 +199,12 @@ namespace moken {
 		const dfa_table_element_t *next;
 	};
 
-	consteval void superimpose_table_row(dfa_table_element_t (&table)[table_length], const bool (&row)[table_width], size_t current_row, size_t (&new_current_rows)[table_width], size_t table_head_row) {
+	consteval void superimpose_table_row(dfa_table_element_t (&table)[table_length], const bool (&row)[table_width], size_t current_row, size_t (&new_current_rows)[table_width], size_t superimposition_target_row) {
 		for (size_t i = 0; i < table_width; i++) {
 			dfa_table_element_t& element = table[current_row * table_width + i];
 			if (element.next == nullptr) {
-				element.next = table_head_row;
-				new_current_rows[i] = table_head_row;
+				element.next = superimposition_target_row;
+				new_current_rows[i] = superimposition_target_row;
 				continue;
 			}
 			new_current_rows[i] = element.next;
@@ -217,54 +217,76 @@ namespace moken {
 		const token_t (&token_array)[decltype(token_array_container)::length] = token_array_container.data;
 		constexpr size_t token_array_length = decltype(token_array_container)::length;
 
+		size_t table_head_row = 1;
+
 		// NOTE: constexpr instead of consteval, for same reason as above.
-		auto func_implementation = [&token_array_index](size_t kleene_token_start_index, size_t token_array_index, size_t current_row, size_t kleene_start_row, size_t superimposition_target_row, const auto& self) constexpr -> size_t {
-			for (; token_array_index < token_array_length; token_array_index++) {
-				token_t token = token_array[token_array_index];
-				switch (token.type) {
-				case token_type_t::ALTERNATION: return true;
-				case token_type_t::SUBEXPRESSION_BEGIN:
-					token_array_index++;
-					size_t new_token_array_index = token_array_index;
-					while (new_token_array_index = self(new_token_array_index, current_row, self)) { }
-					break;
-				case token_type_t::SUBEXPRESSION_END:
-					return false;
+		auto func_implementation = [&table_head_row](size_t kleene_start_token_index, size_t kleene_start_row, size_t subexpression_skip_num, size_t token_array_index, size_t current_row, const auto& self) constexpr -> std::pair<size_t, size_t> {
+			// NOTE: We add 1 to the subexpression_skip_num so that we can escape out of the root function instance.
+			if (token_array_index > token_array_length) { return { subexpression_skip_num + 1, token_array_index }; }
 
-				case token_type_t::KLEENE_CLOSURE_END:
+			token_t token = token_array[token_array_index];
+			switch (token.type) {
+
+			case token_type_t::ALTERNATION: return { subexpression_skip_num, token_array_index + 1 };
+
+			case token_type_t::KLEENE_CLOSURE_START:		// TODO: insert this before start of kleene thing, so there is no row associated with it, easier for this code
+				{
+					std::pair<size_t, size_t> result = self(token_array_index + 1, current_row, subexpression_skip_num, token_array_index + 1, current_row, self);
+					return self(kleene_start_token_index, kleene_start_row, subexpression_skip_num, result.second, current_row, self);
+				{
+
+			case token_type_t::KLEENE_CLOSURE_END:
+				{
 					size_t new_current_rows[table_width];
-					superimpose_table_row(table, token.table_row, current_row, new_current_rows, superimposition_target_row);
 
-					bool return_value = false;
+					superimpose_table_row(table, token.table_row, current_row, new_current_rows, kleene_start_row);
+
 					for (size_t j = 0; j < table_width; j++) {
-						if (new_current_rows[j].next != superimposition_target_row) {
-							return_value = self(kleene_token_start_index, kleene_token_start_index, new_current_rows[j], kleene_start_row, kleene_start_row, self);
+						if (new_current_rows[j].next != kleene_start_row) {
+							self(kleene_token_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[j], self);
+							// TODO: Ignoring return here is safe, write a note about why. Has to do with possible placements of subexpression expressions and such.
 						}
 					}
 
-					return token_array_index + 1;
+					return { subexpression_skip_num, token_array_index + 1 };
+				}
 
-				case token_type_t::KLEENE_CLOSURE_START:		// TODO: insert this before start of kleene thing, so there is no row associated with it, easier for this code
-					size_t return_value = self(/* same stuff but new kleene base veriables */);
-					return self(/* same stuff (old kleene base variables, but new current token variables) */);
+			case token_type_t::SUBEXPRESSION_BEGIN:
+				{
+					size_t new_token_array_index = token_array_index + 1;
+					while (true) {
+						std::pair<bool, size_t> result = self(kleene_start_token_index, kleene_start_row, new_token_array_index, current_row, self);
+						new_token_array_index = result.second;
+						if (result.first != 0) { return result.first - 1; }
+					}		// TODO: This sort of "wastes" a stack layer. Is there any way we can have this stack layer do some row processing as well?
+					break;
+				}
 
-				case token_type_t::TABLE_ROW:
-					// TODO: research order of execution with = operator. The stuff on the left gets evaluated first right, and then the stuff on the right? Very sure that's how it works.
+			case token_type_t::SUBEXPRESSION_END: return self(kleene_start_token_index, kleene_start_row, subexpression_skip_num + 1, token_array_index + 1, current_row, self);
 
+			case token_type_t::TABLE_ROW:
+				// TODO: research order of execution with = operator. The stuff on the left gets evaluated first right, and then the stuff on the right? Very sure that's how it works.
+
+				{
 					size_t new_current_rows[table_width];
 
-					superimpose_table_row(table, token.table_row, current_row, new_current_rows, superimposition_target_row + 1);
+					if (superimpose_table_row(table, token.table_row, current_row, new_current_rows, table_head_row) == true) { table_head_row++; }
 
 					for (size_t j = 0; j < table_width - 1; j++) {
-						func_implementation(new_current_rows[i], kleene_base, self);
+						self(kleene_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[i], self);
 						// TODO: Keep this from going exponential by implementing a grouping algorithm.
+						// TODO: The way the table row head and grouping stuff is handled, a path tail combination pass at the end might not even be necessary. Think about it.
 					}
-					return func_implementation(new_current_rows[i], kleene_base, self);
+					// NOTE: All the runs of the self function that are at the same depth in the recursion tree should return the same value, so ignoring all but one return here is fine.
+					return self(kleene_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[i], self);
 				}
+
 			}
-			return false;
 		};
-		while (func_implementation(0, 0, func_implementation) { }
+
+		std::pair<size_t, size_t> result;
+		result.second = 0;
+		while (result = func_implementation(0, 0, 0, result.second, 0, func_implementation), result.first == 0) { }
 	}
 
 	template <array_container_t specification>
