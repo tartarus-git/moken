@@ -116,7 +116,8 @@ namespace moken {
 	enum class token_type_t : uint8_t {
 		TABLE_ROW,
 		ALTERNATION,
-		KLEENE_CLOSURE,
+		KLEENE_CLOSURE_BEGIN,
+		KLEENE_CLOSURE_END,
 		SUBEXPRESSION_BEGIN,
 		SUBEXPRESSION_END
 	};
@@ -124,6 +125,7 @@ namespace moken {
 	struct token_t {
 		token_type_t type;
 		bool table_row[table_width];
+		size_t additional_subexpression_skips;		// NOTE: only used when type is token_type_t::KLEENE_CLOSURE_END
 	};
 
 	template <array_container_t specification_container>
@@ -157,6 +159,23 @@ namespace moken {
 	}
 
 	template <array_container_t specification_container>
+	consteval auto parse_bracket_expression(size_t spec_index, bool (&table_row)[table_width]) {
+		using spec_element_t = typename decltype(specification_container)::type;
+		// NOTE: Same work-around as above.
+		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
+		constexpr size_t spec_length = decltype(specification_container)::length - 1;	// NOTE: Accounting for null-termination character. We could remove it, but for simplicity's sake, we're leaving it in the actual array, at least for now.
+
+		for (size_t i = spec_index + 1; specification[i] == ']'; i++) {
+			// TODO: Make this make whatever the spec_element_t is unsigned and cast to that, for generality.
+			// Also, make the table width variable dependant on the spec_element_t, because that makes a lot of sense.
+			// It's not gonna be able to stay a global I suppose, but you'll figure something out.
+			table_row[(unsigned char)(specification[i])] = true;
+			// TODO: Add those special character classes (":uppercase:, :lowercase:, etc...").
+			// TODO: Report errors here (duplicates and invalid character classes and syntax errors for the colon characters)
+		}
+	}
+
+	template <array_container_t specification_container>
 	consteval auto tokenize_specification() {
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: Same work-around as above.
@@ -172,16 +191,60 @@ namespace moken {
 
 			switch (character) {
 			case '|': token_array[token_array_index++].type = token_type_t::ALTERNATION; break;
-			case '*': token_array[token_array_index++].type = token_type_t::KLEENE_CLOSURE; break;
-				  // TODO: Redo kleene closure stuff to give token spans instead of actual kleene closure token, like below.
+			case '*':
+				  // TODO: Include type traits or where ever the as_const thing is from.
+				auto insert_token = [&token_array, &token_array_head = std::as_const(token_array_index)](size_t token_array_index, token_t token) consteval {
+					for (size_t i = token_array_head; i > token_array_index; i--) { token_array[i] = token_array[i - 1]; }
+					token_array[token_array_index] = token;
+				};
+
+				auto kleene_closure_implementation = [&token_array, &insert_token](size_t token_array_index, size_t subexpression_skip_num, bool looking_for_alternation, const auto& self) consteval -> void {
+					switch (token_array[token_array_index].type) {
+					case token_type_t::TABLE_ROW:
+						if (subexpression_skip_num != 0 || looking_for_alternation) { return self(token_array_index - 1, subexpression_skip_num, true, self); }
+						token_array[token_array_index].type = token_type_t::KLEENE_CLOSURE_END;
+						token_array[token_array_index].additional_subexpression_skips = subexpression_skip_num;
+						self(token_array_index - 1, subexpression_skip_num, true, self);
+
+					case token_type_t::ALTERNATION:
+						if (subexpression_skip_num != 1) { return self(token_array_index - 1, subexpression_skip_num, true, self);
+						return self(token_array_index - 1, subexpression_skip_num, false, self);
+
+					case token_type_t::SUBEXPRESSION_START:
+						// NOTE: Can't leave the row bools or the subexpression skip variable uninitialized because we use the token list as a template parameter later on, and that isn't allowed for obvious reasons.
+						// NOTE: If we didn't use it as a template parameter and put it in the coming consteval functions as an argument, we could leave it uninitialized I suppose.
+						// NOTE: We could change things so that is the case, but I like it more this way, fits with the established way of doing things in this codebase.
+						// NOTE: I'm willing to accept the unlikely case where this causes inefficiency (I imagine the current version might even be optimal because of the way the compiler might handle things like this).
+						// NOTE: Even if it is inefficient, it'll just be by a little bit, so not worth changing in this case.
+						if (subexpression_skip_num == 0) { return insert_token(token_array_index + 1, { token_type_t::KLEENE_CLOSURE_START, { }, 0 }); }
+						return self(token_array_index - 1, subexpression_skip_num - 1, self);
+
+					case token_type_t::SUBEXPRESSION_END: return self(token_array_index - 1, subexpression_skip_num + 1, self);
+					}
+				};
+
+				switch (token_array[token_array_index - 1].type) {
+				case token_type_t::TABLE_ROW:
+					// TODO: The following is pretty janked, you should come up with a more elegant way.
+					kleene_closure_implementation(token_array_index - 1, 0, false, [](...) { });
+					insert_token(token_aray_index, { token_type_t::KLEENE_CLOSURE_START, { }, 0 });
+					break;
+				case token_type_t::SUBEXPRESSION_END: kleene_closure_implementation(token_array_index - 2, 0, false, kleene_closure_implementation); break;
+				}
+
+				break;
+
 			case '(': token_array[token_array_index++].type = token_type_t::SUBEXPRESSION_BEGIN; break;
 			case ')': token_array[token_array_index++].type = token_type_t::SUBEXPRESSION_END; break;
 			case '[':
 				token_t& token = token_array[token_array_index++];
 				token.type = token_type_t::TABLE_ROW;
-				parse_bracket_expression<specification_container>(++i, token.table_row);
+				parse_bracket_expression<specification_container>(++i, token.table_row);		// TODO: implement this function
 				break;
-				// TODO: add the backslash stuff
+
+			case '\\':
+				i++;
+				/* FALLTHROUGH */
 			default:
 				token_t& token = token_array[token_array_index++];
 				token.type = token_type_t::TABLE_ROW;
@@ -229,7 +292,7 @@ namespace moken {
 
 			case token_type_t::ALTERNATION: return { subexpression_skip_num, token_array_index + 1 };
 
-			case token_type_t::KLEENE_CLOSURE_START:		// TODO: insert this before start of kleene thing, so there is no row associated with it, easier for this code
+			case token_type_t::KLEENE_CLOSURE_START:
 				{
 					std::pair<size_t, size_t> result = self(token_array_index + 1, current_row, subexpression_skip_num, token_array_index + 1, current_row, self);
 					return self(kleene_start_token_index, kleene_start_row, subexpression_skip_num, result.second, current_row, self);
@@ -248,7 +311,7 @@ namespace moken {
 						}
 					}
 
-					return { subexpression_skip_num, token_array_index + 1 };
+					return { subexpression_skip_num + token.additional_subexpression_skips, token_array_index + 1 };
 				}
 
 			case token_type_t::SUBEXPRESSION_BEGIN:
@@ -257,7 +320,7 @@ namespace moken {
 					while (true) {
 						std::pair<bool, size_t> result = self(kleene_start_token_index, kleene_start_row, new_token_array_index, current_row, self);
 						new_token_array_index = result.second;
-						if (result.first != 0) { return result.first - 1; }
+						if (result.first != subexpression_skip_num) { return { result.first - 1, new_token_array_index }; }
 					}		// TODO: This sort of "wastes" a stack layer. Is there any way we can have this stack layer do some row processing as well?
 					break;
 				}
@@ -273,9 +336,9 @@ namespace moken {
 					if (superimpose_table_row(table, token.table_row, current_row, new_current_rows, table_head_row) == true) { table_head_row++; }
 
 					for (size_t j = 0; j < table_width - 1; j++) {
+						// TODO: You probs want to increment the kleene_start_row or something, or else the loop isn't gonna be made successfully.
 						self(kleene_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[i], self);
 						// TODO: Keep this from going exponential by implementing a grouping algorithm.
-						// TODO: The way the table row head and grouping stuff is handled, a path tail combination pass at the end might not even be necessary. Think about it.
 					}
 					// NOTE: All the runs of the self function that are at the same depth in the recursion tree should return the same value, so ignoring all but one return here is fine.
 					return self(kleene_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[i], self);
