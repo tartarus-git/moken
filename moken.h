@@ -2,28 +2,63 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <utility>
 
 namespace moken {
 
-	constexpr size_t table_width = (unsigned char)-1;
-
 	void report_error(const char *message) noexcept;
 
+	template <typename U, typename V>
+	class are_types_same { public: consteval operator bool() { return false; } };
+	template <typename T>
+	class are_types_same<T, T> { public: consteval operator bool() { return true; } };
+
+	template <typename U, typename V>
+	concept same_as_c = ((bool)are_types_same<U, V>{});
+
+	template <typename T>
+	concept convertible_to_compile_time_array_c = requires(T instance, decltype(*(instance.begin())) element_instance) {
+		{ *(instance.end())  } -> same_as_c<decltype(element_instance)>;
+		{ element_instance++ } -> same_as_c<T>;
+		{ ++element_instance } -> same_as_c<T&>;
+		T::length;
+	};
+
+	template <convertible_to_compile_time_array_c source_container_t>
+	array_container_t(const source_container_t& source_container) -> array_container_t<decltype(*(source_container.begin())), source_container_t::length>;
+
 	template <typename element_t, size_t array_length>
-	struct array_container_t {
+	class array_container_t {
+	public:
 		using type = element_t;
 		static constexpr size_t length = array_length;
 
 		element_t data[length];
 
-		consteval array_container_t(const element_t (&source_array)[array_length]) {		// TODO: Consider making this even more general so that many different types could be accepted, std::string, etc...
+		consteval array_container_t(const element_t (&source_array)[array_length]) {
 			for (size_t i = 0; i < length; i++) { data[i] = source_array[i]; }
+		}
+
+		template <convertible_to_compile_time_array_c source_container_t>
+		consteval array_container_t(const source_container_t& source_container) {
+			size_t i = 0;
+			for (element_t element : source_container) { data[i++] = element; }
 		}
 
 		// NOTE: These two aren't used as far as I know, I would like to use them, but a compiler bug seems to be preventing me from doing so.
 		// I use a work-around, but I'm keeping these two functions in case things change or I'm able to use them in a different spot or something.
 		consteval element_t& operator[](size_t index) { return data[index]; }
 		consteval const element_t& operator[](size_t index) const { return data[index]; }
+
+		// NOTE: We don't use the following, but they're here to round out the class.
+		using iterator_t = element_t*;
+		using const_iterator_t = const element_t*;
+
+		consteval iterator_t begin() { return &data; }
+		consteval const_iterator_t begin() const { return &data; }
+
+		consteval iterator_t end() { return &data + length; }
+		consteval const_iterator_t end() const { return &data + length; }
 	};
 
 	template <array_container_t specification_container>
