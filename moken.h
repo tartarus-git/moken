@@ -321,72 +321,129 @@ namespace moken {
 		}
 	}
 
-	// TODO: UP TO HERE WITH THE LOOKING OVER AND POLISHING, KEEP GOING FROM HERE
+	template <typename T>
+	concept insert_specific_token_lambda_c = requires(T instance, size_t token_array_index) {
+		{ instance(std::as_const(token_array_index)) } -> same_as_c<void>;
+		typename char[(instance(std::as_const(token_array_index), 1)];			// NOTE: Checks to make sure that instance(std::as_const(token_array_index)) is executed at compile-time.
+		// The lambda class instance must obviously be constexpr or at least instantiated in a constexpr/consteval function to be accepted as arg to consteval function, but the same is not true
+		// about the operator() function, which is why the above check is important.
+	};
 
-	template <array_container_t specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	template <typename T>
+	concept alter_row_token_lambda_c = requires(T instance, size_t subexpression_skip_num, token_t current_token) {
+		{ instance(std::as_const(subexpression_skip_num), token) } -> same_as_c<void>;
+		typename char[(instance(std::as_const(subexpression_skip_num), token), 1)];
+	};
+
+	template <compatible_array_container_type_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
 	consteval auto tokenize_specification() {
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: Same work-around as above.
 		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
 		constexpr size_t spec_length = decltype(specification_container)::length - 1;	// NOTE: Accounting for null-termination character. We could remove it, but for simplicity's sake, we're leaving it in the actual array, at least for now.
 
-		array_container_t<token_t, calculate_token_array_length<specification_container>()> token_array;
+		constexpr size_t table_width = calculate_table_width<typename decltype(specification_container)::type>();
+
+		array_container_t<token_t, calculate_token_array_length<specification_container>()> token_array { };
 
 		size_t token_array_index = 0;
 
-		for (size_t i = 0; i < spec_length; i++) {
-			spec_element_t character = specification[i];		// TODO: You need to use a type traits make unsigned type of thing here, or else UB when using it as array index.
+		constexpr auto insert_token = [&token_array, &token_array_head = token_array_index](size_t token_array_index, token_t token) consteval {
+			for (size_t i = token_array_head; i > token_array_index; i--) { token_array[i] = token_array[i - 1]; }
+			token_array_head++;
+			token_array[token_array_index] = token;
+		};
 
-			switch (character) {
-			case '|': token_array[token_array_index++].type = token_type_t::ALTERNATION; break;
-			case '*':
-				auto insert_token = [&token_array, &token_array_head = std::as_const(token_array_index)](size_t token_array_index, token_t token) consteval {
-					for (size_t i = token_array_head; i > token_array_index; i--) { token_array[i] = token_array[i - 1]; }
-					token_array[token_array_index] = token;
-				};
+		constexpr auto do_row_token_placements_from_other_placements = [&token_array](size_t token_array_index, size_t subexpression_skip_num, bool ignore_characters, bool looking_for_alternation, const auto& self, 
+													insert_specific_token_lambda_c insert_specific_token, alter_row_token_lambda_c alter_row_token) consteval -> size_t {
+			switch (token_array[token_array_index].type) {
 
-				auto kleene_closure_implementation = [&token_array, &insert_token](size_t token_array_index, size_t subexpression_skip_num, bool looking_for_alternation, const auto& self) consteval -> void {
-					switch (token_array[token_array_index].type) {
-					case token_type_t::TABLE_ROW:
-						if (subexpression_skip_num != 0 || looking_for_alternation) { return self(token_array_index - 1, subexpression_skip_num, true, self); }
-						token_array[token_array_index].type = token_type_t::KLEENE_CLOSURE_END;
-						token_array[token_array_index].additional_subexpression_skips = subexpression_skip_num;
-						self(token_array_index - 1, subexpression_skip_num, true, self);
-
-					case token_type_t::ALTERNATION:
-						if (subexpression_skip_num != 1) { return self(token_array_index - 1, subexpression_skip_num, true, self);
-						return self(token_array_index - 1, subexpression_skip_num, false, self);
-
-					case token_type_t::SUBEXPRESSION_START:
-						// NOTE: Can't leave the row bools or the subexpression skip variable uninitialized because we use the token list as a template parameter later on, and that isn't allowed for obvious reasons.
-						// NOTE: If we didn't use it as a template parameter and put it in the coming consteval functions as an argument, we could leave it uninitialized I suppose.
-						// NOTE: We could change things so that is the case, but I like it more this way, fits with the established way of doing things in this codebase.
-						// NOTE: I'm willing to accept the unlikely case where this causes inefficiency (I imagine the current version might even be optimal because of the way the compiler might handle things like this).
-						// NOTE: Even if it is inefficient, it'll just be by a little bit, so not worth changing in this case.
-						if (subexpression_skip_num == 0) { return insert_token(token_array_index + 1, { token_type_t::KLEENE_CLOSURE_START, { }, 0 }); }
-						return self(token_array_index - 1, subexpression_skip_num - 1, self);
-
-					case token_type_t::SUBEXPRESSION_END: return self(token_array_index - 1, subexpression_skip_num + 1, self);
-					}
-				};
-
-				switch (token_array[token_array_index - 1].type) {
-				case token_type_t::TABLE_ROW:
-					// TODO: The following is pretty janked, you should come up with a more elegant way.
-					kleene_closure_implementation(token_array_index - 1, 0, false, [](...) { });
-					insert_token(token_aray_index, { token_type_t::KLEENE_CLOSURE_START, { }, 0 });
-					break;
-				case token_type_t::SUBEXPRESSION_END: kleene_closure_implementation(token_array_index - 2, 0, false, kleene_closure_implementation); break;
+			case token_type_t::TABLE_ROW:
+				// NOTE: We set looking_for_alternation to true without checking it here because we never ignore characters without also simultaeniously being in the "looking for alternation" state.
+				// We do however sometimes look for alternations without being in the "ignore characters" state, which is why the second check after this one is necessary.
+				if (ignore_characters) { return self(token_array_index - 1, subexpression_skip_num, true, true, self); }
+				if (looking_for_alternation) { return self(token_array_index - 1, subexpression_skip_num, false, true, self); }
+				alter_row_token(subexpression_skip_num, token_array[token_array_index]);
+				if (subexpression_skip_num == 0) {
+					insert_specific_token(token_aray_index);
+					return 0;
 				}
+				return self(token_array_index - 1, subexpression_skip_num, false, true, self);
 
+			case token_type_t::ALTERNATION:
+				// NOTE: If we're ignoring characters, then we simply continue, and we should stay in the "looking for alternation" state, because that still applies. Remember, we know that we must be in that state in this case.
+				// No extra check or anything required.
+				// If we're not ignoring characters, then we should also set looking_for_alternation to false, because after the alternation is encountered, we're not looking for it anymore.
+				return self(token_array_index - 1, subexpression_skip_num, ignore_characters, ignore_characters, self);
+
+			// NOTE: Return and let the SUBEXPRESSION_END code handle this, simply tell it where to jump to in the specification.
+			case token_type_t::SUBEXPRESSION_START: return token_array_index - 1;
+
+			case token_type_t::SUBEXPRESSION_END:
+				// NOTE: We double up looking_for_alternations because of the whole dependent states of the flags thing, see what I've mentioned above already.
+				// Fun fact: This line is actually the root cause of that dependence. Seems like a catch-22, because we're using something that we're responsible for creating, but that's not actually the case.
+				// In reality, this line is either allowed because of the dependence, or it's allowed because the root situation guarantees that ignore_characters be false.
+				// The root function instance relies on the latter, while everything that follows relies on the former. Thus, the line produces it's own guarantees, but this is only possible because the root instance of the line is
+				// a special case. Nothing abnormal for a recursive function, if you think about it, it's just this specific situation that makes it seem a little more magical than it really is.	
+				size_t new_token_array_index = self(token_array_index - 1, subexpression_skip_num + 1, looking_for_alternation, looking_for_alternation, self);
+				if (subexpression_skip_num == 0) {
+					insert_specific_token(new_token_array_index + 2);
+					return 0;
+				}
+				return self(new_token_array_index, subexpression_skip_num, ignore_characters, looking_for_alternation, self);
+
+
+				// TODO: There exists the possibilty to interleave the lambdas with the specification strings in the instantiation of the tokenizer, possibly at the expense of good error reports from the compiler, but it's worth considering.
+
+			}
+		};
+
+		for (size_t i = 0; i < spec_length; i++) {
+			spec_element_t character = specification[i];
+			switch (character) {
+
+			case '|': token_array[token_array_index++].type = token_type_t::ALTERNATION; break;
+
+			case '*':
+				do_row_token_placements_from_other_placements(token_array_index - 1, 0, false, false, do_row_token_placements_from_other_placements, 
+				[&insert_token = std::as_const(insert_token)](size_t token_array_index) consteval {
+					// NOTE: Can't leave the row bools or the subexpression skip variable uninitialized because we use the token list as a template parameter later on, and that isn't allowed for obvious reasons.
+					// NOTE: If we didn't use it as a template parameter and put it in the coming consteval functions as an argument, we could leave it uninitialized I suppose.
+					// NOTE: We could change things so that is the case, but I like it more this way, fits with the established way of doing things in this codebase.
+					// NOTE: I'm willing to accept the unlikely case where this causes inefficiency (I imagine the current version might even be optimal because of the way the compiler might handle things like this).
+					// NOTE: Even if it is inefficient, it'll just be by a little bit, so not worth changing in this case.
+					insert(token_array_index, { token_type_t::KLEENE_CLOSURE_START, { }, 0 });
+				}, 
+				[](size_t subexpression_skip_num, token_t& token) consteval { });
+				token_array[token_array_index++].type = token_type_t::KLEENE_CLOSURE_END;
 				break;
 
 			case '(': token_array[token_array_index++].type = token_type_t::SUBEXPRESSION_BEGIN; break;
+
 			case ')': token_array[token_array_index++].type = token_type_t::SUBEXPRESSION_END; break;
+
 			case '[':
 				token_t& token = token_array[token_array_index++];
 				token.type = token_type_t::TABLE_ROW;
-				parse_bracket_expression<specification_container>(++i, token.table_row);		// TODO: implement this function
+				parse_bracket_expression<specification_container>(++i, token.table_row);
+				break;
+
+			case marker_character:
+				do_row_token_placements_from_other_placements(token_array_index - 1, 0, false, false, do_row_token_placements_from_other_placements, 
+				[&insert_token = std::as_const(insert_token)](size_t token_array_index) consteval { }, 
+				[](size_t subexpression_skip_num, token_t& token) consteval {
+					switch (token.type) {
+					case token_type_t::TABLE_ROW: token.type = token_type_t::MARKER; break;
+					// TODO: Check the error message, make it better if necessary.
+					case token_type_t::MARKER: report_error(R"(moken spec syntax error: multiple markers cannot mark the same position in input sequence (Could a marker succeeding a subexpression have interfered with a marker inside said subexpression?))");
+					}
+				});
+				break;
+
+			case '.':
+				token_t& token = token_array[token_array_index++];
+				token.type = token_type_t::TABLE_ROW;
+				for (size_t j = 0; j < table_width; j++) { token.table_row[j] = true; }
 				break;
 
 			case '\\':
@@ -449,11 +506,13 @@ namespace moken {
 				{
 					size_t new_current_rows[table_width];
 
+					// TODO: Make some simple changes to reflect the new system for kleene closure end tokens.
+
 					superimpose_table_row(table, token.table_row, current_row, new_current_rows, kleene_start_row);
 
 					for (size_t j = 0; j < table_width; j++) {
 						if (new_current_rows[j].next != kleene_start_row) {
-							self(kleene_token_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[j], self);
+							self(kleene_start_token_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[j], self);
 							// TODO: Ignoring return here is safe, write a note about why. Has to do with possible placements of subexpression expressions and such.
 						}
 					}
@@ -473,6 +532,10 @@ namespace moken {
 				}
 
 			case token_type_t::SUBEXPRESSION_END: return self(kleene_start_token_index, kleene_start_row, subexpression_skip_num + 1, token_array_index + 1, current_row, self);
+
+			case token_type_t::MARKER:
+							      // TODO: Implement by simply setting a bool and falling through. superimpose_table_row should accept said bool and do the work if necessary.
+				break;
 
 			case token_type_t::TABLE_ROW:
 				// TODO: research order of execution with = operator. The stuff on the left gets evaluated first right, and then the stuff on the right? Very sure that's how it works.
