@@ -466,9 +466,11 @@ namespace moken {
 		const dfa_table_element_t *next;
 	};
 
-	consteval void superimpose_table_row(dfa_table_element_t (&table)[table_length], const bool (&row)[table_width], size_t current_row, size_t (&new_current_rows)[table_width], size_t superimposition_target_row) {
+	consteval void superimpose_table_row(dfa_table_element_t (&table)[table_length], const bool (&row)[table_width], size_t current_row, size_t (&new_current_rows)[table_width], size_t superimposition_target_row, bool add_marker) {
 		for (size_t i = 0; i < table_width; i++) {
 			dfa_table_element_t& element = table[current_row * table_width + i];
+			if (element.marker) { /* TODO: report error */ }
+			element.marker = true;
 			if (element.next == nullptr) {
 				element.next = superimposition_target_row;
 				new_current_rows[i] = superimposition_target_row;
@@ -487,7 +489,7 @@ namespace moken {
 		size_t table_head_row = 1;
 
 		// NOTE: constexpr instead of consteval, for same reason as above.
-		auto func_implementation = [&table_head_row](size_t kleene_start_token_index, size_t kleene_start_row, size_t subexpression_skip_num, size_t token_array_index, size_t current_row, const auto& self) constexpr -> std::pair<size_t, size_t> {
+		auto func_implementation = [&table_head_row](size_t kleene_start_token_index, size_t kleene_start_row, size_t subexpression_skip_num, size_t token_array_index, size_t current_row, dfa_table_element_t* last_row, const bool (&last_row_source_mask)[table_width], const auto& self) constexpr -> std::pair<size_t, size_t> {
 			// NOTE: We add 1 to the subexpression_skip_num so that we can escape out of the root function instance.
 			if (token_array_index > token_array_length) { return { subexpression_skip_num + 1, token_array_index }; }
 
@@ -504,16 +506,15 @@ namespace moken {
 
 			case token_type_t::KLEENE_CLOSURE_END:
 				{
-					size_t new_current_rows[table_width];
-
-					// TODO: Make some simple changes to reflect the new system for kleene closure end tokens.
-
-					superimpose_table_row(table, token.table_row, current_row, new_current_rows, kleene_start_row);
-
-					for (size_t j = 0; j < table_width; j++) {
-						if (new_current_rows[j].next != kleene_start_row) {
-							self(kleene_start_token_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[j], self);
-							// TODO: Ignoring return here is safe, write a note about why. Has to do with possible placements of subexpression expressions and such.
+					for (size_t i = 0; i < table_width; i++) {
+						if (last_row_source_mask[i] == true) {
+							dfa_table_element_t& element = last_row[i];
+							if (element.next == nullptr) {
+								element.next = kleene_start_row;
+								continue;
+							}
+							// TODO: Make new source mask, one element in this non-grouped form.
+							self(kleene_start_token_index, table[kleene_start_row * table_width + i].next, subexpression_skip_num, kleene_start_token_index, element.next, last_row, new_source_mask, self);
 						}
 					}
 
@@ -547,11 +548,11 @@ namespace moken {
 
 					for (size_t j = 0; j < table_width - 1; j++) {
 						// TODO: You probs want to increment the kleene_start_row or something, or else the loop isn't gonna be made successfully.
-						self(kleene_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[i], self);
+						self(kleene_start_token_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[i], table[current_row * table_width + j], self);
 						// TODO: Keep this from going exponential by implementing a grouping algorithm.
 					}
 					// NOTE: All the runs of the self function that are at the same depth in the recursion tree should return the same value, so ignoring all but one return here is fine.
-					return self(kleene_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[i], self);
+					return self(kleene_start_index, kleene_start_row, subexpression_skip_num, token_array_index + 1, new_current_rows[i], table[current_row * table_width + j], self);
 				}
 
 			}
