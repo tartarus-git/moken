@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <utility>
+#include <tuple>
 #include <concepts>
 #include <type_traits>
 
@@ -20,12 +21,13 @@ namespace moken {
 	template <typename U, typename V>
 	concept same_as_c = ((bool)are_types_same<U, V>{});
 
-	template <typename T>
+	template <typename T, typename this_t>
 	concept convertible_to_compile_time_array_c = requires(T instance, decltype(*(instance.begin())) element_instance) {
 		{ *(instance.end())  } -> same_as_c<decltype(element_instance)>;
 		{ element_instance++ } -> same_as_c<T>;
 		{ ++element_instance } -> same_as_c<T&>;
 		T::length;
+		requires (!same_as_c<this_t>);		// NOTE: In the case where they are equal, the automatically generated copy constructor will take hold instead of our conversion constructor, which is better for efficiency.
 	};
 
 	template <convertible_to_compile_time_array_c source_container_t>
@@ -43,7 +45,7 @@ namespace moken {
 			for (size_t i = 0; i < length; i++) { data[i] = source_array[i]; }
 		}
 
-		template <convertible_to_compile_time_array_c source_container_t>
+		template <convertible_to_compile_time_array_c<decltype(*this)> source_container_t>
 		consteval array_container_t(const source_container_t& source_container) {
 			size_t i = 0;
 			for (element_t element : source_container) { data[i++] = element; }
@@ -177,7 +179,6 @@ namespace moken {
 					case '|': report_error(R"(moken spec syntax error: marker ("@") cannot be preceeded by alternation ("|"))");
 					case '(': report_error(R"(moken spec syntax error: marker ("@") cannot be preceeded by opening parenthesis ("("))");
 					case '@': report_error(R"(moken spec syntax error: marker ("@") cannot be preceeded by marker ("@"))");
-					// TODO: I wanna be able to put them after ) characters, but we need to switch the subexpression system tokenization to more of the likes of the kleene closure system for that to work, because we have to apply it to the table row tokens, as with kleene closure ends.
 					}
 					break;
 
@@ -225,19 +226,21 @@ namespace moken {
 	}
 
 	enum class token_type_t : uint8_t {
-		TABLE_ROW,
 		ALTERNATION,
 		KLEENE_CLOSURE_BEGIN,
 		KLEENE_CLOSURE_END,
 		SUBEXPRESSION_BEGIN,
 		SUBEXPRESSION_END,
 		MARKER
+		TABLE_ROW,
 	};
 
+	template <size_t table_width>
 	struct token_t {
+		static constexpr size_t row_length = table_width;
+
 		token_type_t type;
-		bool table_row[table_width];
-		size_t additional_subexpression_skips;		// NOTE: only used when type is token_type_t::KLEENE_CLOSURE_END
+		bool table_row[row_length];
 	};
 
 	template <compatible_array_container_type_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
@@ -277,7 +280,7 @@ namespace moken {
 	consteval uint32_t calculate_table_width() { return (uint32_t)(specification_container_element_t)-1 + 1; }
 
 	template <compatible_array_container_type_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
-	consteval auto parse_bracket_expression(size_t spec_index, bool (&table_row)[calculate_table_width<typename decltype(specification_container)::type>()]) {
+	consteval size_t parse_bracket_expression(size_t spec_index, bool (&table_row)[calculate_table_width<typename decltype(specification_container)::type>()]) {
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: Same work-around as above.
 		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
@@ -295,7 +298,9 @@ namespace moken {
 		if (previous_character == '-') { report_error(R"(moken spec syntax error: bracket expression ("[...]") cannot start with a hyphen ("-"))"); }
 		add_character(table_row, specification[previous_character]);
 
-		for (size_t i = spec_index + 2; specification[i] != ']'; i++) {
+		size_t i;
+
+		for (i = spec_index + 2; specification[i] != ']'; i++) {
 			spec_element_t character = specification[i];
 			if (character == '-') {
 				if (!previous_character_available_for_hyphen) { report_error(R"(moken spec syntax error: two hyphen expressions ("a-b") cannot intersect in bracket expression ("[...]"))"); }
@@ -319,6 +324,263 @@ namespace moken {
 			previous_character = character;
 			previous_character_available_for_hyphen = true;
 		}
+
+		return i;
+	}
+
+	template <compatible_array_container_type_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	consteval auto tokenize_specification() {
+		using spec_element_t = typename decltype(specification_container)::type;
+		// NOTE: Same work-around as above.
+		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
+		constexpr size_t spec_length = (spec_type == spec_type_t::NO_EXTRA_NULL ? decltype(specification_container)::length : decltype(specification_container)::length - 1);
+
+		constexpr size_t table_width = calculate_table_width<decltype(specification_container)::type>();
+
+		using instanced_token_t = token_t<table_width>;
+
+		array_container_t<instanced_token_t, calculate_token_array_length<specification_container, spec_type>()> result { };
+
+		size_t token_array_index = 0;
+
+		auto insert_token = [&token_array = result, &token_array_head = std::as_const(token_array_index)](size_t token_array_index, const instanced_token_t& token) consteval {
+			for (size_t i = token_array_head; i > token_array_index; i--) { token_array[i] = token_array[i - 1]; }
+			token_array[token_array_index] = token;
+		}
+
+		for (size_t i = 0; i < spec_length; i++) {
+			spec_element_t element = specification[i];
+			switch (element) {
+
+			case '|': result[token_array_index++].type = token_type_t::ALTERNATION; break;
+
+			case '*':
+				result[token_array_index++].type = token_type_t::KLEENE_CLOSURE_END;
+				size_t token_backtrack_index = token_array_index - 1;
+				switch (result[--token_backtrack_index].type) {
+				case token_type_t::SUBEXPRESSION_END:
+					size_t nesting_depth = 1;
+					while (true) {
+						switch (result[--token_backtrack_index].type) {
+						case token_type_t::SUBEXPRESSION_END: nesting_depth++; break;
+						case token_type_t::SUBEXPRESSION_START:
+							nesting_depth--;
+							if (nesting_depth == 0) { goto finished_and_insert_token; }
+							break;
+						}
+					}
+				case token_type_t::TABLE_ROW: break;
+				// NOTE: Any other cases cannot happen because we've already filtered those constellations out via syntax checks.
+				}
+finished_and_insert_token:
+				insert_token(token_backtrack_index, { token_type_t::KLEENE_CLOSURE_START, { } });
+				break;
+
+			case '[':
+				result[token_array_index].type = token_type_t::TABLE_ROW;
+				i = parse_bracket_expression<specification_container, spec_type>(i, result[token_array_index].table_row);
+				token_array_index++;
+				break;
+
+			case '(': result[token_array_index].type = token_type_t::SUBEXPRESSION_START; break;
+			case ')': result[token_array_index].type = token_type_t::SUBEXPRESSION_END; break;
+
+			case marker_character: result[token_array_index++].type = token_type_t::MARKER; break;
+
+			case '.':
+				result[token_array_index].type = token_type_t::TABLE_ROW;
+				result[token_array_index].table_row = { true };
+				token_array_index++;
+				break;
+
+			case '\\': i++;
+			/* FALLTHROUGH */
+			default:
+				result[token_array_index].type = token_type_t::TABLE_ROW;
+				result[token_array_index].table_row[element] = true;
+				token_array_index++;
+				break;
+
+			}
+		}
+
+		return result;
+	}
+
+	template <typename T>
+	struct is_token_type { static constexpr bool value = false; };
+	template <size_t table_width>
+	struct is_token_type<token_t<table_width>> { static constexpr bool value = true; };
+
+	template <typename T>
+	inline constexpr bool is_token_type_v = is_token_type<T>::value;
+
+	template <typename T>
+	concept token_type_c = is_token_type_v<T>;
+
+	template <typename T>
+	concept token_array_container_type_c = token_type_c<T::type>;
+
+	template <token_array_container_type_c token_array_container>
+	consteval std::tuple<size_t, size_t, size_t> calculate_nfa_table_metrics() {
+		using instanced_token_t = decltype(token_array_container)::type;
+		constexpr size_t token_array_length = decltype(token_array_container)::length;
+		const instanced_token_t (&token_array)[token_array_length];
+
+		size_t rows = 0;
+		size_t next_vector_capacity = 1;
+		size_t nested_kleene_closures = 0;
+
+		for (size_t i = 0; i < token_array_length; i++) {
+			instanced_token_t& token = token_array[i];
+			switch (token) {
+			case token_type_t::ALTERNATION: next_vector_capacity++; break;
+			case token_type_t::KLEENE_CLOSURE_BEGIN: nested_kleene_closures++; break;
+			case token_type_t::KLEENE_CLOSURE_END: next_vector_capacity++; nested_kleene_closures--; break;
+			case token_type_t::SUBEXPRESSION_BEGIN: break;
+			case token_type_t::SUBEXPRESSION_END: break;
+			case token_type_t::MARKER: break;
+			case token_type_t::TABLE_ROW: rows++; break;
+			}
+		}
+
+		return { rows, next_vector_capacity, nested_kleene_closures };
+	}
+
+	template <size_t highest_reachable_num>
+	struct minimum_unsigned_integral_t_impl { };
+	template <size_t highest_reachable_num, typename = std::enable_if<highest_reachable_sum < (uint8_t)-1>::type>
+	struct minimum_unsigned_integral_t_impl<highest_reachable_num> { using type = uint8_t; };
+	template <size_t highest_reachable_num, typename = std::enable_if<highest_reachable_sum < (uint16_t)-1>::type>
+	struct minimum_unsigned_integral_t_impl<highest_reachable_num> { using type = uint16_t; };
+	template <size_t highest_reachable_num, typename = std::enable_if<highest_reachable_sum < (uint32_t)-1>::type>
+	struct minimum_unsigned_integral_t_impl<highest_reachable_num> { using type = uint32_t; };
+	template <size_t highest_reachable_num, typename = std::enable_if<highest_reachable_sum < (uint64_t)-1>::type>
+	struct minimum_unsigned_integral_t_impl<highest_reachable_num> { using type = uint64_t; };
+
+	template <size_t highest_reachable_num>
+	using minimum_unsigned_integral_t = typename minimum_unsigned_integral_t_impl<highest_reachable_num>::type;
+
+	template <typename element_t, size_t capacity>
+	class vector_t {
+	public:
+		// NOTE: Depending on what these types end up as, the memory layout here could be suboptimal, but there's no way to fix that in current C++ as I'm aware.
+		// In this case, it's not a big deal at all.
+		element_t data[capacity];
+		using storage_size_t = minimum_unsigned_integral_t<capacity>;
+		storage_size_t head;
+
+		consteval bool push_back(const element_t& element) {
+			if (head == capacity) { return false; }
+			data[head++] = element;
+			return true;
+		}
+		consteval element_t pop_back() { return data[--head]; }
+
+		consteval const element_t& operator[](storage_size_t index) const { return data[index]; }
+		consteval element_t& operator[](storage_size_t index) { return data[index]; }
+	};
+
+	template <typename source_t, typename target_t>
+	concept implicitly_convertible_to_x_type_c = requires(source_t source_instance) {
+		[](target_t){}(source_instance);
+	};
+
+	template <typename element_t, size_t capacity>
+	class stack_t {
+	public:
+		vector_t<element_t, capacity> data;
+
+		consteval bool push(const element_t& element) { return data.push_back(element); }
+
+		template <implicitly_convertible_to_x_type_c<element_t> other_element_t, size_t other_capacity>
+			// TODO: Move all the refs to the right side, as here, makes more sense given that int a, b, c behavior, just like for pointers.
+		consteval bool push(const stack_t<other_element_t, other_capacity> &other_stack) { return data.push_back(other_stack.pop()); }
+
+		consteval element_t pop() { return data.pop_back(); }
+
+		consteval operator<<(const element_t& right) { push(right); }
+
+		template <implicitly_convertible_to_x_type_c<element_t> other_element_t, size_t other_capacity>
+		consteval operator<<(const stack_t<other_element_t, other_capacity> &other_stack) { push(other_stack); }
+
+		consteval operator>>(element_t& right) { right = pop(); }
+	};
+
+	template <size_t next_vector_capacity>
+	struct nfa_table_element_t {
+		vector_t<element_t, next_vector_capacity> next;
+		size_t marker;
+	};
+
+	template <token_array_container_type_c token_array_container>
+	consteval auto generate_nfa_table_from_tokens() {
+		using instanced_token_t = decltype(token_array_container)::type;
+		constexpr size_t token_array_length = decltype(token_array_container)::length;
+		const instanced_token_t (&token_array)[token_array_length];
+
+		constexpr size_t table_width = instanced_token_t::row_length;
+
+		auto [table_length, element_next_vector_capacity, kleene_stack_capacity] = calculate_nfa_table_metrics<token_array_container>();
+		using instanced_nfa_table_element_t = nfa_table_element_t<element_next_vector_capacity>;
+		array_container_t<instanced_nfa_table_element_t, table_length * table_width> result { };
+		size_t table_head = 0;
+
+		stack_t<size_t, kleene_stack_capacity> kleene_stack;
+
+		auto implementation = [&token_array, &token_array_length, &result](size_t token_array_index, size_t current_row, nfa_table_element_t& last_table_element, size_t nesting_depth, const auto& self) consteval -> std::pair<size_t, size_t> {
+			auto superimpose_table_row = [](size_t row_number, const bool (&row)[table_width]) consteval {
+				// TODO: Go through code and see where else you can use that minimum_unsigned_integral_t thing.
+				instanced_nfa_table_element *new_last_table_row = result + row_number * table_width;	// TODO: Use whole rows so that we can avoid branching.
+				for (size_t i = 0; i < instanced_token_t::row_length; i++) {
+					if (row[i] == false) { continue; }
+					instanced_nfa_table_element_t& element = result[row_number * table_width + i];
+					element.next << table_head;		// TODO: Only leave this as is once you 100% know that the capacity of the stack cannot be blown, because the measuring is bullet proof.
+				}
+				table_head++;
+			};
+
+			instanced_token_t& token = token_array[token_array_index];
+			switch (token.type) {
+
+			case token_type_t::ALTERNATION: return { token_array_index + 1, nesting_depth };
+
+			case token_type_t::KLEENE_CLOSURE_START:
+				kleene_stack << current_row;	// TODO: Only leave this once you know the capacity is bullet-proof, as above.
+				// TODO: And same with the other appearences of the << operator.
+				return self(token_array_index + 1, current_row, last_table_element, self);
+
+			case token_type_t::KLEENE_CLOSURE_END:
+				last_table_element.next << kleene_stack;
+				return self(token_array_index + 1, current_row, last_table_element, self);
+
+			case token_type_t::SUBEXPRESSION_START:
+				std::pair<size_t, size_t> new_values { token_array_index + 1, nesting_depth + 1 };
+				while (true) {
+					std::pair<size_t, size_t> result = self(next_token_array_index, current_row, last_table_element, new_nesting_depth, self);
+					if (result.second != new_values.second) { return result; }
+					new_values = result;
+				}
+
+			case token_type_t::SUBEXPRESSION_END: return self(token_array_index + 1, current_row, last_table_element, nesting_depth - 1, self);
+
+			case token_type_t::MARKER:
+				last_table_element.marker++;
+				return self(token_array_index + 1, current_row, last_table_element, nesting_depth, self);
+
+			case token_type_t::TABLE_ROW:
+				nfa_table_element_t *new_last_table_row = superimpose_table_row(current_row, token.table_row);
+				return self(token_array_index + 1, table_head, new_last_table_row, nesting_depth, self);
+
+			}
+		};
+
+		size_t next_token_array_index = 0;
+		while (true) {
+			next_token_array_index = implementation(next_token_array_index, implementation);
+		}
+
+		return result;
 	}
 
 }
