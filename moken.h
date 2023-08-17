@@ -428,7 +428,7 @@ finished_and_insert_token:
 		const instanced_token_t (&token_array)[token_array_length];
 
 		size_t rows = 0;
-		size_t next_vector_capacity = 1;
+		size_t next_vector_capacity = 1;		// TODO: This defo isn't counted right, it needs to be aware of nestings and linears, simple fix.
 		size_t nested_kleene_closures = 0;
 
 		for (size_t i = 0; i < token_array_length; i++) {
@@ -464,7 +464,7 @@ finished_and_insert_token:
 	template <typename element_t, size_t capacity>
 	class vector_t {
 	public:
-		// NOTE: Depending on what these types end up as, the memory layout here could be suboptimal, but there's no way to fix that in current C++ as I'm aware.
+		// NOTE: Depending on what these types end up as, the memory layout here could be suboptimal, but there's no way to fix that in current C++ as far as I'm aware.
 		// In this case, it's not a big deal at all.
 		element_t data[capacity];
 		using storage_size_t = minimum_unsigned_integral_t<capacity>;
@@ -507,17 +507,20 @@ finished_and_insert_token:
 		consteval operator>>(element_t& right) { right = pop(); }
 	};
 
-	template <size_t next_vector_capacity>
+	template <size_t next_vector_capacity_param>
 	struct nfa_table_element_t {
-		vector_t<element_t, next_vector_capacity> next;
+		static constexpr size_t next_vector_capacity = next_vector_capacity_param;
+
+		vector_t<size_t, next_vector_capacity> next;
 		size_t marker;
+		bool end_state;
 	};
 
 	template <token_array_container_type_c token_array_container>
 	consteval auto generate_nfa_table_from_tokens() {
 		using instanced_token_t = decltype(token_array_container)::type;
 		constexpr size_t token_array_length = decltype(token_array_container)::length;
-		const instanced_token_t (&token_array)[token_array_length];
+		const instanced_token_t (&token_array)[token_array_length] = token_array_container.data;
 
 		constexpr size_t table_width = instanced_token_t::row_length;
 
@@ -577,10 +580,112 @@ finished_and_insert_token:
 
 		size_t next_token_array_index = 0;
 		while (true) {
-			next_token_array_index = implementation(next_token_array_index, implementation);
+			auto [new_next_token_array_index, new_nesting_depth] = implementation(next_token_array_index, 0, nullptr, 1, implementation);
+			if (new_nesting_depth == 0) { break; }
+			next_token_array_index = new_next_token_array_index;
 		}
 
 		return result;
+	}
+
+	struct dfa_table_element_t {
+		const dfa_table_element_t *next;
+		size_t markers;
+		bool is_terminator;
+	};
+
+	template <typename T>
+	struct is_nfa_table_element_type { static constexpr bool value = false; };
+	template <size_t next_vector_capacity>
+	struct is_nfa_table_element_type<nfa_table_element_t<next_vector_capacity>> { static constexpr bool value = true; };
+
+	template <typename T>
+	inline constexpr bool is_nfa_table_element_type_v = is_nfa_table_element_type<T>::value;
+
+	template <typename T>
+	concept nfa_table_element_type_c = is_nfa_table_element_type_v<T>;
+
+	template <typename T>
+	concept nfa_table_element_array_container_type_c = nfa_table_element_type_c<T::type>;
+
+	template <nfa_table_element_array_container_type_c nfa_table_container, uint32_t table_width>
+	consteval auto convert_nfa_to_dfa() {
+		using instanced_nfa_table_element_t = decltype(nfa_table_container)::type;
+		constexpr size_t nfa_table_1d_length = decltype(nfa_table_container)::length;
+		constexpr size_t nfa_table_length = nfa_table_1d_length / table_width;
+		const instanced_nfa_table_element_t (&nfa_table)[nfa_table_1d_length] = nfa_table_container.data;
+
+		array_container_t<dfa_table_element_t, nfa_table_1d_length> dfa_table { };
+		size_t dfa_table_head_row = 1;
+
+		constexpr auto superimpose_element_next_vector_versions = [
+									   &nfa_table
+									  ]
+									  <
+									   size_t possible_states_buffer_capacity
+									  >
+									  (
+									   // TODO: constraint
+									   const auto &possible_states,
+									   size_t row_index
+									  )
+									  consteval
+		{
+			vector_t<size_t, possible_states_buffer_capacity> result;
+			for (size_t state : possible_states) {
+				result.push_back(nfa_table[state * table_width + row_index].next);
+			}
+			result.remove_duplicates();
+			return result;
+		};
+
+		constexpr auto implementation = [
+						 &nfa_table,		// TODO: as const
+			  			 &dfa_table,
+						 &dfa_table_head_row
+						]
+						(
+						 size_t dfa_row,
+						 const auto &possible_states
+						 const auto &self
+						)
+						consteval
+		{
+			// TODO: markers, create 2D array of lists of markers, which we'll fill up with all the possible marker lists up to this point.
+			// This is because every state has it's own possible marker list up to this point and we need to store all of those.
+			// We can measure out the container though, because the process isn't self-referential like the state process is.
+			// So measure out the container and store the lists and then decide which list to finalize in the table when you reach a stop condition.
+			// Maybe it's not possible, think about it again. These are essentially captures you know.
+			bool finished_elements[table_width];
+			for (size_t j = table_width * dfa_row; j < table_width * current_state + table_width; j++) {
+				if (fin_el == true) { continue; }
+
+				auto [possible_states_buffer_j, termination_handler] = superimpose_element_versions<possible_states_buffer_capacity>(possible_states,
+																	possible_states_length,
+																	j - table_width * current_state);
+
+				finished_elements[j - table_width * dfa_row] = true;
+				dfa_table[j].next = dfa_table_head_row;
+				dfa_table[j].termination_handler = termination_handler;
+				for (size_t k = j + 1; k < table_width * current_state + table_width; k++) {
+					if (fin_el == true) { continue; }
+
+				auto [possible_states_buffer_k, termination_handler] = superimpose_element_versions<possible_states_buffer_capacity>(possible_states,
+																	possible_states_length,
+																	j - table_width * current_state);
+
+					if (possible_states_buffer_j == possible_states_buffer_k) {
+						finished_elements[k - table_width * current_state] = true;
+						dfa_table[k].next = dfa_table_head_row;
+						dfa_table[k].termination_handler = termination_handler;
+					}
+				}
+				self(dfa_table_head_row, possible_states_buffer_j, self);
+				dfa_table_head_row++;
+			}
+		};
+
+		return dfa_table;
 	}
 
 }
