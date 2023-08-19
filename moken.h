@@ -135,7 +135,7 @@ namespace moken {
 	};
 
 	template <compatible_array_container_t_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
-	consteval size_t calculate_max_table_length() {
+	consteval void check_specification_syntax() {
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: The following line of code is a work-around for what seems to be a compiler bug.
 		// I can't write specification_container[i], clang keeps complaining that i is non-const and can't be used in a constant expression,
@@ -156,12 +156,11 @@ namespace moken {
 		if constexpr (spec_length == 0) { report_error("moken spec syntax error: specification cannot be empty"); return 0; }
 
 		size_t i = 0;
-		size_t result = 0;
 		bool is_inside_bracket_expression = false;
 
 		// NOTE: I wanted to make this consteval instead of constexpr, but for some reason (which smells strongly of a compiler bug, TODO: REPORT!!!!)
 		// consteval doesn't work, even though both versions are executed at compile-time in this case.
-		auto func_implementation = [&i, &result, &is_inside_bracket_expression](size_t nesting_depth, const auto& self) constexpr -> void {
+		auto func_implementation = [&i, &is_inside_bracket_expression](size_t nesting_depth, const auto& self) constexpr -> void {
 			for (; i < spec_length; i++) {
 				spec_element_t character = specification[i];
 				switch (character) {
@@ -194,7 +193,6 @@ namespace moken {
 					if (!is_inside_bracket_expression) { report_error(R"(moken spec syntax error: closing square bracket ("]") is invalid without corresponding opening square bracket ("["))"); }
 					if (specification[i - 1] == '[') { report_error(R"(moken spec syntax error: bracket expression ("[...]") cannot be empty)"); }
 					is_inside_bracket_expression = false;
-					result++;
 					break;
 
 				case '(':
@@ -236,7 +234,6 @@ namespace moken {
 						break;
 					default: report_error(R"(moken spec syntax error: escape character ("\") must be succeeded by metacharacter)");
 					}
-					result++;
 					break;
 
 				case '.':
@@ -244,7 +241,6 @@ namespace moken {
 
 				default:
 					if (is_inside_bracket_expression) { break; }	// NOTE: Further syntax checking of bracket expressions is done below.
-					result++;
 					break;
 				}
 			}
@@ -258,7 +254,8 @@ namespace moken {
 		// NOTE: The following should never evaluate to true since any specification that's passed all the syntax checks up to here
 		// should definitely produce at least one row, but in case I've made a mistake somewhere, this'll make sure we at least
 		// get a good error message, for debugging.
-		if (result == 0) { report_error("moken spec syntax error: specification must produce at least one DFA table row"); }
+		// TODO: Replace this with something that doesn't use result, because we removed that.
+		//if (result == 0) { report_error("moken spec syntax error: specification must produce at least one DFA table row"); }
 
 		return result;
 	}
@@ -278,10 +275,7 @@ namespace moken {
 		static constexpr uint32_t row_length = table_width;
 
 		token_type_t type;
-		union {
-			bool table_row[row_length];
-			uint16_t new_termination_handler;
-		};
+		bool table_row[row_length];
 	};
 
 	template <compatible_array_container_t_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
@@ -509,13 +503,14 @@ finished_and_insert_token:
 	concept token_array_container_t_c = token_type_c<T::type>;
 
 	template <token_array_container_t_c token_array_container>
-	consteval std::tuple<size_t, size_t, size_t> calculate_nfa_table_metrics() {
+	consteval std::tuple<size_t, size_t, size_t, size_t> calculate_table_metrics() {
 		using instanced_token_t = decltype(token_array_container)::type;
 		constexpr size_t token_array_length = decltype(token_array_container)::length;
 		// NOTE: Same work-around as above.
 		const instanced_token_t (&token_array)[token_array_length];
 
-		size_t rows = 0;
+		size_t dfa_max_rows = 0;
+		size_t nfa_max_rows = 0;
 
 		size_t max_next_vector_capacity = 1;
 
@@ -525,7 +520,8 @@ finished_and_insert_token:
 		size_t token_array_index = 0;
 
 		constexpr auto implementation = [
-						 rows,
+						 &nfa_max_rows,
+						 &dfa_max_rows,
 						 &max_next_vector_capacity,
 						 &current_nested_kleene_closures,
 						 &max_nested_kleene_closures,
@@ -543,7 +539,7 @@ finished_and_insert_token:
 				const instanced_token_t &token = token_array[token_array_index];
 				switch (token) {
 
-				case token_type_t::ALTERNATION: current_next_vector_capacity++; break;
+				case token_type_t::ALTERNATION: current_next_vector_capacity++; nfa_max_rows++; break;
 
 				case token_type_t::KLEENE_CLOSURE_BEGIN:
 					current_nested_kleene_closures++;
@@ -552,10 +548,11 @@ finished_and_insert_token:
 					}
 					break;
 
-				case token_type_t::KLEENE_CLOSURE_END: nested_kleene_closures--; break;
+				case token_type_t::KLEENE_CLOSURE_END: nested_kleene_closures--; nfa_max_rows++; break;
 
 				case token_type_t::SUBEXPRESSION_BEGIN:
 					token_array_index++;
+					nfa_max_rows++;
 					self(self);
 					break;
 
@@ -564,17 +561,18 @@ finished_and_insert_token:
 						max_next_vector_capacity = current_next_vector_capacity;
 					}
 					token_array_index++;
+					nfa_max_rows++;
 					return;
 
-				case token_type_t::MARKER: break;
+				case token_type_t::MARKER: nfa_max_rows++; break;
 
-				case token_type_t::TABLE_ROW: rows++; break;
+				case token_type_t::TABLE_ROW: nfa_max_rows++; dfa_max_rows++; break;
 
 				}
 			}
 		};
 
-		return { rows, max_next_vector_capacity, max_nested_kleene_closures };
+		return { nfa_max_rows, dfa_max_rows, max_next_vector_capacity, max_nested_kleene_closures };
 	}
 
 	template <size_t highest_reachable_num>
@@ -636,19 +634,20 @@ finished_and_insert_token:
 		consteval operator>>(element_t &right) { right = pop(); }
 	};
 
-	template <size_t next_vector_capacity_param, size_t marker_vector_capacity_param>
+	template <size_t next_vector_capacity_param>
 	struct nfa_table_element_t {
 		static constexpr size_t next_vector_capacity = next_vector_capacity_param;
-		static constexpr size_t marker_vector_capacity = marker_vector_capacity_param;
 
 		vector_t<size_t, next_vector_capacity> next;
-		vector_t<size_t, marker_vector_capacity> marker;
+		bool marker;
 		uint16_t termination_handler;
 	};
 
-	// TODO: Do that retry code stuff for the marker_vector_capacity.
-	// TODO: Is marker_vector_capacity exactly as big as the state buffer capacity?
-	template <token_array_container_t_c token_array_container, size_t marker_vector_capacity>
+	// TODO: fix this, we need to accept the value and not the type
+	template <token_array_container_t_c token_array_container,
+		  size_t table_length,
+		  size_t element_next_vector_capacity,
+		  size_t kleene_stack_capacity>
 	consteval auto generate_nfa_table_from_tokens() {
 		using instanced_token_t = decltype(token_array_container)::type;
 		constexpr size_t token_array_length = decltype(token_array_container)::length;
@@ -657,128 +656,187 @@ finished_and_insert_token:
 
 		constexpr uint32_t table_width = instanced_token_t::row_length;
 
-		constexpr auto [table_length, element_next_vector_capacity, kleene_stack_capacity] = calculate_nfa_table_metrics<token_array_container>();
-		using instanced_nfa_table_element_t = nfa_table_element_t<element_next_vector_capacity, marker_vector_capacity>;
-		array_container_t<instanced_nfa_table_element_t, table_length * table_width> result { };
+		using instanced_nfa_table_element_t = nfa_table_element_t<element_next_vector_capacity>;
+		array_container_t<instanced_nfa_table_element_t, table_length * table_width> nfa_table { };
+
+		array_container_t<bool, table_length> ghost_rows { };
 
 		size_t table_head = 0;
 
 		stack_t<size_t, kleene_stack_capacity> kleene_stack;
 
+		constexpr auto create_new_row = [&table_length]() consteval {
+			if (table_head >= table_length) {
+				report_error("moken bug detected: nfa table head overflowed");
+			}
+			return table_head++;
+		};
+
+		constexpr auto register_ghost_row = [&ghost_rows](size_t row_number) consteval {
+			if (row_number >= table_head) {
+				report_error("moken bug detected: register_ghost_row(size_t) called with out-of-bounds row_number");
+			}
+			ghost_rows[row_number] = true;
+		}
+
 		constexpr auto superimpose_table_row = [
-							&table_width
+							&table_width,
+							&nfa_table
 						       ]
 						       (
 							size_t row_number,
 							const bool (&row)[table_width],
-							bool inc_table_head = true
+							size_t target_row_number
+						       )
+						       consteval
+			// TODO: Go through code and see where else you can use that minimum_unsigned_integral_t thing.
+		{
+			const size_t row_offset = row_number * table_width;
+
+			for (uint32_t i = 0; i < instanced_token_t::row_length; i++) {
+				if (row[i] == false) { continue; }
+
+				instanced_nfa_table_element_t &element = nfa_table[row_offset + i];
+				if (element.next.push_back(target_row_number) == false) {
+					report_error("moken bug detected: nfa element next vector capacity blown while superimposing non-ghost row");
+				}
+			}
+		};
+
+		constexpr auto superimpose_ghost_row = [
+							&table_width,
+							&nfa_table
+						       ]
+						       (
+							size_t row_number,
+							size_t target_row_number
 						       )
 						       consteval
 		{
-			// TODO: Go through code and see where else you can use that minimum_unsigned_integral_t thing.
 			const size_t row_offset = row_number * table_width;
-			instanced_nfa_table_element *new_last_table_row = result + row_offset;
-			for (uint32_t i = 0; i < instanced_token_t::row_length; i++) {
-				if (row[i] == false) { continue; }
-				instanced_nfa_table_element_t &element = result[row_offset + i];
-				if (element.next.push_back(table_head) == false) {
-					report_error("moken bug detected: nfa element next vector capacity exceeded");
-				}
+
+			if (ghost_rows[row_number] == false) {
+				report_error("moken bug detected: cannot ghost superimpose onto non-ghost row");
 			}
-			table_head++;
+
+			if (nfa_table[row_offset].next.push_back(target_row_number) == false) {
+				report_error("moken bug detected: nfa element next vector capacity blown while superimposing ghost row");
+			}
 		};
 
-		constexpr auto implementation = [
-						 &token_array,
-						 &token_array_length,
-						 &result,
-						 &superimpose_table_row,
-						 &element_next_vector_capacity,
-						 &table_width
-						]
+		constexpr auto implementation = [&]
 						(
 						 size_t token_array_index,
 						 size_t current_row,
-						 const auto &push_to_last_next,
-						 size_t nesting_depth,
-						 size_t subexpression_end_target,
+						 size_t last_table_row,
 						 const auto& self
 						)
 						consteval
-						-> std::pair<size_t, size_t, size_t, size_t>
+						-> std::pair<size_t, bool, size_t>
 		{
-			// NOTE: THE FOLLOWING IS SUPER FUCKED, YOU MIGHT HAVE TO START OVER, FIGURE SOMETHING GOOD OUT.
+			if (token_array_index >= token_array_length) {
+				register_ghost_row(current_row);
+				return { token_array_index, true, current_row };
+			}
 
 			const instanced_token_t &token = token_array[token_array_index];
 			switch (token.type) {
 
-			case token_type_t::ALTERNATION: return { token_array_index + 1, nesting_depth };
+			case token_type_t::ALTERNATION:
+				register_ghost_row(current_row);
+				return { token_array_index + 1, false, current_row };
 
 			case token_type_t::KLEENE_CLOSURE_START:
-				kleene_stack << current_row;	// TODO: Only leave this once you know the capacity is bullet-proof, as above.
-				// TODO: And same with the other appearences of the << operator.
-				return self(token_array_index + 1, current_row, last_table_element, self);
+				kleene_stack.push(current_row);
+				return self(token_array_index + 1, current_row, last_table_row, self);
 
 			case token_type_t::KLEENE_CLOSURE_END:
-				last_table_element.next << kleene_stack;
-				return self(token_array_index + 1, current_row, last_table_element, self);
+				register_ghost_row(current_row);
+				superimpose_ghost_row(current_row, kleene_stack.pop());
+				size_t next_row = create_new_row();
+				superimpose_ghost_row(current_row, next_row);
+				return self(token_array_index + 1, next_row, current_row, self);
 
 			case token_type_t::SUBEXPRESSION_START:
-				vector_t<size_t, element_next_vector_capacity> branch_end_row_nums;
-				vector_t<array_container_t<bool, table_width>, element_next_vector_capacity> branch_end_row_filters;
+				register_ghost_row(current_row);
+
+				vector_t<size_t, element_next_vector_capacity> branch_end_rows;
 
 				size_t new_token_array_index = token_array_index + 1;
 
 				while (true) {
-					const auto [returned_token_array_index, returned_nesting_depth, returned_end_row_num, returned_end_row_filter] = self(new_token_array_index,
-																 table_head++,
-																 last_table_element,
-																 nesting_depth + 1,
-																 current_row,
-																 self);
+					const size_t target_row = create_new_row();
+					superimpose_ghost_row(current_row, target_row);
+					const auto [returned_token_array_index,
+					      	    should_break_out,
+						    returned_end_row] = self(new_token_array_index,
+									     target_row,
+									     last_table_element,
+									     current_row,
+									     self);
 
-					// TODO: error handling
-					branch_end_row_nums.push_back(returned_end_row_num);
-					branch_end_row_filters.push_back(returned_end_row_filters);
+					if (branch_end_rows.push_back(returned_end_row) == false) {
+						report_error("moken bug detected: branch_end_rows capacity blown in nfa gen SUBEXPRESSION_START");
+					}
 
 					new_token_array_index = returned_token_array_index;
-					if (returned_nesting_depth == nesting_depth) { break; }
-					if (returned_nesting_depth < nesting_depth) {
-						// TODO: throw error
-					}
+
+					if (should_break_out) { break; }
 				}
 
+				const size_t ghost_sink = create_new_row();
+				register_ghost_row(ghost_sink);
 				for (size_t i = 0; i < decltype(branch_end_row_nums)::length; i++) {
-					superimpose_table_row(branch_end_row_nums[i], branch_end_row_filters[i], superimpose_behavior::NO_INC_TABLE_HEAD);
+					superimpose_ghost_row(branch_end_row_nums[i], ghost_sink);
 				}
 
-				constexpr auto new_push_to_last_next = []() {
-					for (
-				};
+				const size_t next_row = create_new_row();
+				superimpose_ghost_row(ghost_sink, next_row);
+				return self(new_token_array_index, next_row, ghost_sink, self);
 
-				return self(new_token_array_index, table_head, , nesting_depth, self);
-
-			case token_type_t::SUBEXPRESSION_END: return self(token_array_index + 1, current_row, last_table_element, nesting_depth - 1, self);
+			case token_type_t::SUBEXPRESSION_END:
+				register_ghost_row(current_row);
+				return { token_array_index + 1, true, current_row };
 
 			case token_type_t::MARKER:
-				last_table_element.marker++;
-				return self(token_array_index + 1, current_row, last_table_element, nesting_depth, self);
+				register_ghost_row(current_row);
+				nfa_table[current_row * table_width].marker = true;
+				size_t next_row = create_new_row();
+				superimpose_ghost_row(current_row, next_row);
+				return self(token_array_index + 1, next_row, current_row, self);
 
 			case token_type_t::TABLE_ROW:
-				nfa_table_element_t *new_last_table_row = superimpose_table_row(current_row, token.table_row);
-				return self(token_array_index + 1, table_head, new_last_table_row, nesting_depth, self);
+				size_t next_row = create_new_row();
+				superimpose_table_row(current_row, token.table_row, next_row);
+				return self(token_array_index + 1, next_row, current_row, self);
 
 			}
 		};
 
+
+		vector_t<size_t, (uint16_t)-1 - 1> branch_end_rows;
 		size_t next_token_array_index = 0;
 		while (true) {
-			auto [new_next_token_array_index, new_nesting_depth] = implementation(next_token_array_index, 0, nullptr, 1, implementation);
-			if (new_nesting_depth == 0) { break; }
-			next_token_array_index = new_next_token_array_index;
+			auto [returned_next_token_array_index, should_break_out, returned_end_row] = implementation(next_token_array_index,
+														    0,
+														    -1,
+														    1,
+														    implementation);
+			if (branch_end_rows.push_back(returned_end_row) == false) {
+				// TODO: Check that this number doesn't exceed before-hand as form of user input validation.
+				// At this stage, it IS a bug, if it hasn't been caught already.
+				report_error("moken bug detected: top-level branch_end_rows vector length exceeded capacity while building nfa");
+			}
+			next_token_array_index = returned_next_token_array_index;
+			if (should_break_out) { break; }
 		}
 
-		return result;
+		uint16_t current_termination_handler = 1;	// NOTE: Starting at 1 is necessary because nfa table is zero-ed out.
+		for (size_t end_row : branch_end_rows) {
+			nfa_table[end_row * table_width].termination_handler = current_termination_handler++;
+		}
+
+		return std::pair(nfa_table, ghost_rows);
 	}
 
 	struct dfa_table_element_t {
@@ -788,27 +846,62 @@ finished_and_insert_token:
 	};
 
 	template <typename T>
-	struct is_nfa_table_element_type { static constexpr bool value = false; };
+	class is_nfa_table_element_t {
+	public:
+		static constexpr bool value = false;
+		consteval operator bool() const { return value; }
+	};
 	template <size_t next_vector_capacity>
-	struct is_nfa_table_element_type<nfa_table_element_t<next_vector_capacity>> { static constexpr bool value = true; };
+	struct is_nfa_table_element_t<nfa_table_element_t<next_vector_capacity>> {
+	public:
+		static constexpr bool value = true;
+		consteval operator bool() const { return value; }
+	};
 
 	template <typename T>
-	inline constexpr bool is_nfa_table_element_type_v = is_nfa_table_element_type<T>::value;
+	inline constexpr bool is_nfa_table_element_t_v = is_nfa_table_element_t<T>::value;
 
 	template <typename T>
-	concept nfa_table_element_type_c = is_nfa_table_element_type_v<T>;
+	concept nfa_table_element_t_c = is_nfa_table_element_t_v<T>;
+
+	template <array_container_t_c T>
+	concept nfa_table_row_container_c = nfa_table_element_t_c<T::type>;
 
 	template <typename T>
-	concept nfa_table_element_array_container_type_c = nfa_table_element_type_c<T::type>;
+	class is_nfa_table {
+	public:
+		static constexpr bool value = false;
+		consteval operator bool() const { return value; }
+	};
+	template <nfa_table_row_container_c nfa_table_row_container_t>
+	class is_nfa_table<std::pair<nfa_table_row_container_t, array_container_t<bool, nfa_table_row_container_t::length>>> {
+	public:
+		static constexpr bool value = true;
+		consteval operator bool() const { return value; }
+	};
 
-	template <nfa_table_element_array_container_type_c nfa_table_container, uint32_t table_width>
+	template <typename T>
+	inline constexpr bool is_nfa_table_v = is_nfa_table<T>::value;
+
+	template <typename T>
+	concept nfa_table_c = is_nfa_table_v<T>;
+
+	template <auto nfa_table_package, size_t dfa_table_length, uint32_t table_width> requires nfa_table_c<decltype(nfa_table_package)>
 	consteval auto convert_nfa_to_dfa() {
+		auto nfa_table_container = nfa_table_package.first;
+		auto nfa_ghost_rows = nfa_table_package.second;
+
 		using instanced_nfa_table_element_t = decltype(nfa_table_container)::type;
 		constexpr size_t nfa_table_1d_length = decltype(nfa_table_container)::length;
 		constexpr size_t nfa_table_length = nfa_table_1d_length / table_width;
+
+		if (nfa_table_length < dfa_table_length) {
+			report_error("moken bug detected: nfa_table_length is smaller than dfa_table_length in convert_nfa_to_dfa()");
+		}
+
 		const instanced_nfa_table_element_t (&nfa_table)[nfa_table_1d_length] = nfa_table_container.data;
 
-		array_container_t<dfa_table_element_t, nfa_table_1d_length> dfa_table { };
+		array_container_t<dfa_table_element_t, dfa_table_length * table_width> dfa_table { };
 		size_t dfa_table_head_row = 1;
 
 		constexpr auto superimpose_element_next_vector_versions = [
@@ -832,17 +925,14 @@ finished_and_insert_token:
 			return result;
 		};
 
-		constexpr auto implementation = [
-						 &nfa_table,		// TODO: as const
-			  			 &dfa_table,
-						 &dfa_table_head_row
-						]
+		constexpr auto implementation = [&]
 						(
 						 size_t dfa_row,
 						 const auto &possible_states
 						 const auto &self
 						)
 						consteval
+						-> // TODO: return value
 		{
 			// TODO: markers, create 2D array of lists of markers, which we'll fill up with all the possible marker lists up to this point.
 			// This is because every state has it's own possible marker list up to this point and we need to store all of those.
@@ -891,9 +981,12 @@ finished_and_insert_token:
 
 	template <compatible_array_container_type_c specification, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
 	consteval auto make_tokenizer_t() {
+		check_specification_syntax<specification, spec_type>();
 		constexpr auto spec_token_array = tokenize_specification<specification, spec_type>();
-		constexpr auto nfa_table = generate_nfa_table_from_tokens<spec_token_array>();
-		constexpr auto dfa_table = convert_nfa_to_dfa<nfa_table, /* table width */>();
+		constexpr auto [nfa_max_rows, dfa_max_rows, element_next_vector_capacity, kleene_stack_capacity]
+			= calculate_table_metrics<spec_token_array>();
+		constexpr auto nfa_table = generate_nfa_table_from_tokens<spec_token_array, nfa_max_rows, element_next_vector_capacity, kleene_stack_capacity>();
+		constexpr auto dfa_table = convert_nfa_to_dfa<nfa_table, dfa_max_rows, /* table width */>();
 		constexpr auto tail_combined_dfa_table = do_dfa_tail_combination<dfa_table, /* table width */>();
 		tokenizer_t<decltype(tail_combined_dfa_table)::dfa_table_1d_length> result { tail_combined_dfa_table };
 		return result;
