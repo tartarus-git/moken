@@ -10,14 +10,18 @@
 
 namespace moken {
 
-	inline constexpr char marker_character = '@';
-
 	void report_error(const char *message) noexcept;
 
 	template <typename U, typename V>
 	class are_types_same {
 	public:
 		static constexpr bool value = false;
+		// NOTE: We don't actually ever use this bool conversion functionality AFAIK,
+		// but it's in here for completeness. I see the value in keeping the code short and cutting out fluff,
+		// because it's all in a header, but I chose to opt for completeness because I find it more elegant
+		// and the extra space usage doesn't seem like it'll be a problem in this case.
+		// TO READERS: Hello, thx for taking a look at my code, if you feel we should strip some of
+		// the unnecessary stuff out of here, post an issue, we'll talk.
 		consteval operator bool() { return value; }
 	};
 	template <typename T>
@@ -90,15 +94,15 @@ namespace moken {
 			for (element_t element : source_container) { data[i++] = element; }
 		}
 
-		// NOTE: These two aren't used as far as I know, I would like to use them, but a compiler bug seems to be preventing me from doing so.
-		// I use a work-around, but I'm keeping these two functions in case things change or I'm able to use them in a different spot or something.
+		// NOTE: These two aren't used as far as I know, I would like to use them, but a compiler bug
+		// seems to be preventing me from doing so. I use a work-around, but I'm keeping these two
+		// functions in case things change or I'm able to use them in a different spot or something.
 		consteval element_t& operator[](size_t index) { return data[index]; }
 		consteval const element_t& operator[](size_t index) const { return data[index]; }
 
 		// NOTE: We don't use the following, but they're here to round out the class.
 		using iterator_t = element_t*;
 		using const_iterator_t = const element_t*;
-		// TODO: Is this compatible with that iterator data struct in the standard library?
 
 		consteval iterator_t begin() { return &data; }
 		consteval const_iterator_t begin() const { return &data; }
@@ -106,6 +110,18 @@ namespace moken {
 		consteval iterator_t end() { return &data + length; }
 		consteval const_iterator_t end() const { return &data + length; }
 	};
+
+	// NOTE: This whole compatible/sufficiently_compatible business is basically just this:
+	// compatible array containers are array_container_t's with unsigned integral elements that are smaller than 3 bytes (uint8s and uint16s).
+	// sufficiently compatible array containers are the same, but the elements don't have to be unsigned.
+	// The interface between library and user accepts sufficiently compatible array containers and then internally converts
+	// them to compatible ones, because we need unsigned stuff all over the place for indexing into tables and such.
+	// The reason we go to all this trouble is because it's implementation defined whether or not the type char is signed or unsigned,
+	// and if it's signed we can't safely rely on it as an array index without converting to unsigned first.
+	// This system allows us to handle string literals as inputs to template parameters properly.
+	// I know that we could enforce all this directly inside the constructor for array_container_t and probably use less code to do it,
+	// but array_container_t is supposed to be a general-purpose structure, and I think it's more elegant to enforce this stuff from
+	// outside of the class, rather than compromise array_container_t's purpose.
 
 	template <std::unsigned_integral T>
 	concept compatible_array_container_element_t_c = (sizeof(T) <= 2);
@@ -117,9 +133,10 @@ namespace moken {
 	concept sufficiently_compatible_array_container_element_t_c = (sizeof(T) <= 2);
 
 	template <array_container_t_c array_container_type>
-	concept sufficiently_compatible_array_container_t_c = sufficiently_compatible_array_container_element_t_c<typename array_container_type::type>;
+	concept sufficiently_compatible_array_container_t_c
+		= sufficiently_compatible_array_container_element_t_c<typename array_container_type::type>;
 
-	template <auto array_container> requires sufficiently_compatible_array_container_t_c<decltype(array_container)>
+	template <array_container_t array_container> requires sufficiently_compatible_array_container_t_c<decltype(array_container)>
 	consteval auto convert_sufficiently_compatible_array_container_to_compatible_array_container() {
 		array_container_t<std::make_unsigned_t<typename decltype(array_container)::type>, decltype(array_container)::length> result;
 		for (size_t i = 0; i < decltype(result)::length; i++) {
@@ -134,7 +151,8 @@ namespace moken {
 		NO_EXTRA_NULL
 	};
 
-	template <compatible_array_container_t_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	template <array_container_t specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	requires compatible_array_container_t_c<decltype(specification_container)>
 	consteval void check_specification_syntax() {
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: The following line of code is a work-around for what seems to be a compiler bug.
@@ -151,16 +169,14 @@ namespace moken {
 						: decltype(specification_container)::length - 1
 					       );
 
-		// NOTE: The return 0 is necessary here to allow the constexpr if statement to actually works it's magic.
-		// Or else everything else will get instantiated anyway I suppose.
-		if constexpr (spec_length == 0) { report_error("moken spec syntax error: specification cannot be empty"); return 0; }
+		static_assert(spec_length != 0, "moken spec syntax error: specification cannot be empty");
 
 		size_t i = 0;
 		bool is_inside_bracket_expression = false;
 
-		// NOTE: I wanted to make this consteval instead of constexpr, but for some reason (which smells strongly of a compiler bug, TODO: REPORT!!!!)
-		// consteval doesn't work, even though both versions are executed at compile-time in this case.
-		auto func_implementation = [&i, &is_inside_bracket_expression](size_t nesting_depth, const auto& self) constexpr -> void {
+		// NOTE: I wanted to make this consteval instead of constexpr, but for some reason (which smells strongly of a compiler bug,
+		// TODO: REPORT!!!!) consteval doesn't work, even though both versions are executed at compile-time in this case.
+		auto func_implementation = [&i, &is_inside_bracket_expression](size_t nesting_depth, const auto &self) constexpr -> void {
 			for (; i < spec_length; i++) {
 				spec_element_t character = specification[i];
 				switch (character) {
@@ -208,28 +224,19 @@ namespace moken {
 					if (specification[i - 1] == '(') { report_error(R"~(moken spec syntax error: subexpression ("(...)") cannot be empty)~"); }
 					return;
 
-				case marker_character:
-					if (is_inside_bracket_expression) { break; }
-					if (i == 0) { report_error(R"(moken spec syntax error: marker ("@") cannot be the first character in a specification)"); }
-					switch (specification[i - 1]) {
-					case '|': report_error(R"(moken spec syntax error: marker ("@") cannot be preceeded by alternation ("|"))");
-					case '(': report_error(R"(moken spec syntax error: marker ("@") cannot be preceeded by opening parenthesis ("("))");
-					case '@': report_error(R"(moken spec syntax error: marker ("@") cannot be preceeded by marker ("@"))");
-					}
-					break;
-
 				case '\\':
 					if (i == spec_length - 1) { report_error(R"(moken spec syntax error: escape character ("\") must be succeeded by something)"); }
 					switch (specification[i + 1]) {
-					case '|':	// NOTE: A couple of these don't need an escape character in front of them if you write them in a bracket expression, but we'll allow it anyway for simplicity.
+					case '|':	// NOTE: A couple of these don't need an escape character in front of
+							// them if you write them in a bracket expression, but we'll allow it anyway for simplicity.
 					case '*':
 					case '[':
 					case ']':
 					case '(':
 					case ')':
 					case '.':
-					case marker_character:
-					case '-':	// NOTE: This only needs to be escaped inside bracket expressions, but we'll allow it anywhere for simplicity.
+					case '-':	// NOTE: This only needs to be escaped inside bracket expressions, but we'll
+							// allow it anywhere for simplicity.
 					case '\\':
 						break;
 					default: report_error(R"(moken spec syntax error: escape character ("\") must be succeeded by metacharacter)");
@@ -237,10 +244,10 @@ namespace moken {
 					break;
 
 				case '.':
-					/* FALLTHROUGH */
-
+				/* FALLTHROUGH */
 				default:
-					if (is_inside_bracket_expression) { break; }	// NOTE: Further syntax checking of bracket expressions is done below.
+					// NOTE: Further syntax checking of bracket expressions is done below.
+					if (is_inside_bracket_expression) { break; }
 					break;
 				}
 			}
@@ -251,12 +258,6 @@ namespace moken {
 		};
 		func_implementation(0, func_implementation);
 
-		// NOTE: The following should never evaluate to true since any specification that's passed all the syntax checks up to here
-		// should definitely produce at least one row, but in case I've made a mistake somewhere, this'll make sure we at least
-		// get a good error message, for debugging.
-		// TODO: Replace this with something that doesn't use result, because we removed that.
-		//if (result == 0) { report_error("moken spec syntax error: specification must produce at least one DFA table row"); }
-
 		return result;
 	}
 
@@ -266,7 +267,6 @@ namespace moken {
 		KLEENE_CLOSURE_END,
 		SUBEXPRESSION_BEGIN,
 		SUBEXPRESSION_END,
-		MARKER
 		TABLE_ROW,
 	};
 
@@ -278,7 +278,8 @@ namespace moken {
 		bool table_row[row_length];
 	};
 
-	template <compatible_array_container_t_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	template <array_container_t specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	requires compatible_array_container_t_c<decltype(specification_container)>
 	consteval size_t calculate_token_array_length() {
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: Same work-around as above.
@@ -304,7 +305,6 @@ namespace moken {
 				i++;
 				for (; specification[i] != ']'; i++) { }
 				break;
-			case marker_character: break;
 			case '\\': result++; i++; break;
 			case '.':
 			/* FALLTHROUGH */
@@ -315,11 +315,20 @@ namespace moken {
 		return result;
 	}
 
-	template <typename specification_container_element_t> requires compatible_array_container_element_t_c<specification_container_element_t>;
+	template <compatible_array_container_element_t_c specification_container_element_t>
 	consteval uint32_t calculate_table_width() { return (uint32_t)(specification_container_element_t)-1 + 1; }
 
-	template <compatible_array_container_t_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
-	consteval size_t parse_bracket_expression(size_t spec_index, bool (&table_row)[calculate_table_width<typename decltype(specification_container)::type>()]) {
+	// NOTE: My bracket expressions stray from POSIX bracket expressions because I find those unnecessarily complicated.
+	// That whole group definition syntax with :uppercase: and :lowercase: and such is redundant when you can simply say
+	// "A-Z" or "a-z". Also, I remember that the handling of various edge-cases in the syntax was particularly strange.
+	// TO READERS: If you've got a problem with this, post an issue, we can talk.
+
+	// TODO: You probably want to implement the ^ syntax for bracket expressions, because that is very useful.
+	// It should only change the following function, so it's not a big deal.
+
+	template <array_container_t specification_container, uint32_t table_width, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	requires compatible_array_container_t_c<specification_container>
+	consteval size_t parse_bracket_expression(size_t spec_index, bool (&table_row)[table_width]) {
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: Same work-around as above.
 		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
@@ -329,13 +338,14 @@ namespace moken {
 						: decltype(specification_container)::length - 1
 					       );
 
-		auto add_character = [](bool (&table_row)[calculate_table_width<typename decltype(specification_container)::type>()], spec_element_t character) consteval {
+		auto add_character = [](bool (&table_row)[table_width], spec_element_t character) consteval {
 			bool& row_bool = table_row[character];
 			if (row_bool == true) { report_error(R"(moken spec syntax error: a character cannot be directly or indirectly specified more than once in a bracket expression ("[...]"))"); }
 			row_bool = true;
 		};
 
-		// NOTE: We can be sure there's a corresponding end bracket and at least one character inside of the brackets because of previous syntax checks.
+		// NOTE: We can be sure there's a corresponding end bracket and at least one character inside of the brackets
+		// because of previous syntax checks.
 		spec_element_t previous_character = specification[spec_index + 1];
 		bool previous_character_available_for_hyphen = true;
 		if (previous_character == '-') { report_error(R"(moken spec syntax error: bracket expression ("[...]") cannot start with a hyphen ("-"))"); }
@@ -358,9 +368,9 @@ namespace moken {
 				// and we also add the boundary characters themselves of course.
 				// This is obviously dependant on the character encoding that your compiler is using, but I figure that
 				// aspect could be useful in and of itself.
-				// I've also never seen a C++ compiler stray from ASCII for char encoding, so anything other than ASCII is probably very unlikely.
-				// ASCII takes care of us very well in this situation: [A-Z, a-z, 0-9] all work great and subsets of those obviously
-				// work great as well.
+				// I've also never seen a C++ compiler stray from ASCII for char encoding, so anything other than
+				// ASCII is probably very unlikely. ASCII takes care of us very well in this situation:
+				// [A-Z, a-z, 0-9] all work great and subsets of those obviously work great as well.
 				for (spec_element_t j = previous_character + 1; j <= character; j++) { add_character(table_row, specification[j]); }
 				previous_character_available_for_hyphen = false;
 				continue;
@@ -374,7 +384,8 @@ namespace moken {
 		return i;
 	}
 
-	template <compatible_array_container_type_c specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	template <array_container_t specification_container, uint32_t table_width, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	requires compatible_array_container_t_c<decltype(specification_container)>
 	consteval auto tokenize_specification() {
 		using spec_element_t = typename decltype(specification_container)::type;
 		// NOTE: Same work-around as above.
@@ -384,8 +395,6 @@ namespace moken {
 						? decltype(specification_container)::length
 						: decltype(specification_container)::length - 1
 					       );
-
-		constexpr uint32_t table_width = calculate_table_width<decltype(specification_container)::type>();
 
 		using instanced_token_t = token_t<table_width>;
 
@@ -458,8 +467,6 @@ finished_and_insert_token:
 				nesting_depth--;
 				break;
 
-			case marker_character: result[token_array_index++].type = token_type_t::MARKER; break;
-
 			case '.':
 				result[token_array_index].type = token_type_t::TABLE_ROW;
 				result[token_array_index].table_row = { true };
@@ -502,12 +509,13 @@ finished_and_insert_token:
 	template <array_container_t_c T>
 	concept token_array_container_t_c = token_type_c<T::type>;
 
-	template <token_array_container_t_c token_array_container>
+	template <array_container_t token_array_container>
+	requires token_array_container_t_c<decltype(token_array_container)>
 	consteval std::tuple<size_t, size_t, size_t, size_t> calculate_table_metrics() {
 		using instanced_token_t = decltype(token_array_container)::type;
 		constexpr size_t token_array_length = decltype(token_array_container)::length;
 		// NOTE: Same work-around as above.
-		const instanced_token_t (&token_array)[token_array_length];
+		const instanced_token_t (&token_array)[token_array_length] = token_array_container.data;
 
 		size_t dfa_max_rows = 0;
 		size_t nfa_max_rows = 0;
@@ -519,20 +527,7 @@ finished_and_insert_token:
 
 		size_t token_array_index = 0;
 
-		constexpr auto implementation = [
-						 &nfa_max_rows,
-						 &dfa_max_rows,
-						 &max_next_vector_capacity,
-						 &current_nested_kleene_closures,
-						 &max_nested_kleene_closures,
-						 &token_array_index
-						]
-						(
-						 const auto &self
-						)
-						consteval
-						-> void
-		{
+		constexpr auto implementation = [&](const auto &self) consteval -> void {
 			size_t current_next_vector_capacity = 1;
 
 			for (; token_array_index < token_array_length; token_array_index++) {
@@ -564,8 +559,6 @@ finished_and_insert_token:
 					nfa_max_rows++;
 					return;
 
-				case token_type_t::MARKER: nfa_max_rows++; break;
-
 				case token_type_t::TABLE_ROW: nfa_max_rows++; dfa_max_rows++; break;
 
 				}
@@ -575,6 +568,12 @@ finished_and_insert_token:
 		return { nfa_max_rows, dfa_max_rows, max_next_vector_capacity, max_nested_kleene_closures };
 	}
 
+	// NOTE: This thing is pretty cool. It's definitely not the most technically complex thing in this project,
+	// but I think it's pretty cool.
+	// What doesn't immediately come to mind but makes it even cooler is the following:
+	// If one of those types (uint8_t, uint16_t, etc...) isn't defined for some reason (platform doesn't support that size),
+	// which could theoretically happen (although not realistically), the system will just pick the next-best one,
+	// because of the magic of SFINAE.
 	template <size_t highest_reachable_num>
 	struct minimum_unsigned_integral_t_impl { };
 	template <size_t highest_reachable_num, typename = std::enable_if<highest_reachable_sum < (uint8_t)-1>::type>
@@ -589,6 +588,23 @@ finished_and_insert_token:
 	template <size_t highest_reachable_num>
 	using minimum_unsigned_integral_t = typename minimum_unsigned_integral_t_impl<highest_reachable_num>::type;
 
+	// NOTE: Technically, one would expect pushing onto a vector to start the lifetime of an object and
+	// popping off of a vector to end the lifetime of an object. Also, one would expect the constructors and destructors
+	// to run, respectively. Implementing those things at compile-time is possible, but since I don't have access to
+	// malloc, which is what one would normally use in this case, the implementation would be too clunky and
+	// incur compile-time performance costs that could potentially be non-negligable.
+	// If we just start the lifetime once and never end it, these problems go away.
+	// None of the rest of the code relies on constructors/destructors being run or lifetimes starting/ending, so this is fine for this project.
+	// It's kind of a shame that this class, which I originally intended to be very general-purpose, is now specialized for
+	// this project, but I think it's the best decision in this case.
+
+	// NOTE: Note that the omission of the expected lifetime and constructor/destructor behavior doesn't mean we don't use std::move.
+	// When taking things out of the vector, we std::move, because moving (if the move constructor is written by someone
+	// who isn't crazy) doesn't rely on destruction of any sort (since moved-from entities get naturally destructed all the time
+	// and calling the destructor twice is undefined behavior).
+	// We can move from the internal array and turn right back around and copy a new value into the slot.
+	// Lifetime never ended, everythings good.
+
 	template <typename element_t, size_t capacity>
 	class vector_t : public array_container_t<element_t, capacity> {
 	public:
@@ -599,11 +615,40 @@ finished_and_insert_token:
 		storage_size_t head;
 
 		consteval bool push_back(const element_t &element) {
-			if (head == capacity) { return false; }
+			if (head >= capacity) { return false; }
 			data[head++] = element;
 			return true;
 		}
-		consteval element_t pop_back() { return data[--head]; }
+		consteval element_t pop_back() { return std::move(data[--head]); }
+
+		consteval element_t pluck(storage_size_t index) {
+			element_t result = std::move(data[index]);	// NOTE: Can't be const since we want to be able to move from it.
+			head--;
+			for (storage_size_t i = index; i < head; i++) {
+				data[index] = data[index + 1];
+			}
+			return result;
+			// NOTE: At compile-time: Guaranteed to be moved (at least once. I'm not sure if it sometimes can be moved more
+			// than once while returning and being received by the caller).
+			// At run-time (if this theoretically were being executed at run-time):
+			// Guaranteed to be AT LEAST moved. If it isn't moved, that's because optimizations have been applied
+			// and move elision has taken place (google RVO for more details).
+			// Fun fact: This is one of the only places in C++ where the as-if rule doesn't apply.
+			// Reasoning for diff between run and compile:
+			// The afore-mentioned optimizations can only be applied in certain standardized situations.
+			// Additionally, the question of whether or not these optimizations can be applied is
+			// not solvable for every possible function. Some are too complex to be able to be sure
+			// that optimizations can be applied. It's impossible to make a general rule,
+			// so the behavior is left undetermined, determined only by the sophistication of the compiler.
+			// For compile-time, it's obviously very useful to have rigorous, deterministic behavior,
+			// especially since speed isn't as important. That's why move is enforced in cases like this,
+			// and the optimizations that might be applicable are not allowed.
+			// There are edge-cases, like when the whole function body consists of one return statement,
+			// where I'm pretty sure compile-time also does the optimizations, because they're guaranteed
+			// at runtime as well, but I'm not too sure. Better check the documentation to be sure.
+		}
+
+		consteval void clear() { head = 0; }
 	};
 
 	template <typename source_t, typename target_t>
@@ -619,19 +664,41 @@ finished_and_insert_token:
 		consteval bool push(const element_t &element) { return data.push_back(element); }
 
 		template <implicitly_convertible_to_x_type_c<element_t> other_element_t, size_t other_capacity>
-			// TODO: Move all the refs to the right side, as here, makes more sense given that int a, b, c behavior, just like for pointers.
+		// TODO: Move all the refs to the right side, as here, makes more sense given that int a, b, c behavior, just like for pointers.
 		consteval bool push(const stack_t<other_element_t, other_capacity> &other_stack) { return data.push_back(other_stack.pop()); }
 
 		consteval element_t pop() { return data.pop_back(); }
 
+		// NOTE: This is a good context to talk about the following:
+		// C++ turns every mention of stack_t without a template parameter list (provided it's mentioned within the class stack_t)
+		// into the same type as the instantiated surrounding class, unless of course you provide an explicit parameter list.
+		// I guess the designers thought this a useful feature, because as you can see below, you can use it in the return value for example,
+		// to avoid clunky parameter lists.
+		// IN REALITY, IT'S STUPID! --> Doing something like stack_t(...) won't deduce the type of the class using template argument deduction,
+		// like one would expect. Instead, it does what I mentioned above, which could cause either subtle errors or compilation failures.
+		// That's disgusting and confusing for no reason.
+		// A MUCH BETTER SOLUTION:
+		// C++ should just do nothing. Either you can use auto instead of stack_t& below, or you can define something like:
+		// using myself_t = decltype(*this);
+		// Or you can just do decltype(*this) as the return value below.
+		// That would avoid the unnecessary confusion and the gotcha's that the current behavior causes.
+
+		// NOTE: We don't use the below functions, I just couldn't resist implementing them because the >> and << operators look really nice
+		// for stack operations. It's a shame error handling isn't elegantly implementable (which is why we don't use them).
+
 		// NOTE: IGNORES ERRORS, SO BE SURE THAT YOU WON'T GET ANY BEFORE USING!
-		consteval operator<<(const element_t &right) { push(right); }
+		consteval stack_t& operator<<(const element_t &right) { push(right); return *this; }
 
 		// NOTE: IGNORES ERRORS, SO BE SURE THAT YOU WON'T GET ANY BEFORE USING!
 		template <implicitly_convertible_to_x_type_c<element_t> other_element_t, size_t other_capacity>
-		consteval operator<<(const stack_t<other_element_t, other_capacity> &other_stack) { push(other_stack); }
+		consteval stack_t& operator<<(const stack_t<other_element_t, other_capacity> &other_stack) { push(other_stack); return *this; }
 
-		consteval operator>>(element_t &right) { right = pop(); }
+		consteval stack_t& operator>>(element_t &right) { right = pop(); return *this; }
+
+		// NOTE: IGNORES ERRORS, SO BE SURE THAT YOU WON'T GET ANY BEFORE USING!
+		template <typename other_element_t, size_t other_capacity>
+		requires implicitly_convertible_to_x_type_c<element_t, other_element_t>
+		consteval stack_t& operator>>(stack_t<other_element_t, other_capacity> &other_stack) { other_stack << *this; return *this; }
 	};
 
 	template <size_t next_vector_capacity_param>
@@ -639,14 +706,13 @@ finished_and_insert_token:
 		static constexpr size_t next_vector_capacity = next_vector_capacity_param;
 
 		vector_t<size_t, next_vector_capacity> next;
-		bool marker;
 	};
 
-	// TODO: fix this, we need to accept the value and not the type
-	template <token_array_container_t_c token_array_container,
+	template <array_container_t token_array_container,
 		  size_t table_length,
 		  size_t element_next_vector_capacity,
 		  size_t kleene_stack_capacity>
+	requires token_array_container_t_c<decltype(token_array_container)>
 	consteval auto generate_nfa_table_from_tokens() {
 		using instanced_token_t = decltype(token_array_container)::type;
 		constexpr size_t token_array_length = decltype(token_array_container)::length;
@@ -673,9 +739,31 @@ finished_and_insert_token:
 
 		constexpr auto register_ghost_row = [&ghost_rows](size_t row_number) consteval {
 			if (row_number >= table_head) {
-				report_error("moken bug detected: register_ghost_row(size_t) called with out-of-bounds row_number");
+				report_error("moken bug detected: register_ghost_row() called with out-of-bounds row_number");
 			}
 			ghost_rows[row_number] = true;
+		}
+
+		constexpr auto register_terminator = [
+						      &nfa_table,
+						      &table_width,
+						      &ghost_rows = std::as_const(ghost_rows)
+						     ]
+						     (
+						      size_t row_number,
+						      uint16_t termination_handler
+						     )
+						     consteval
+		{
+			if (row_number >= table_head) {
+				report_error("moken bug detected: register_terminator() called with out-of-bounds row_number");
+			}
+			if (ghost_rows[row_number] == false) {
+				report_error("moken bug detected: register_terminator() called for a non-ghost row");
+			}
+			nfa_table[row_number * table_width].next.clear();
+			nfa_table[row_number * table_width + 1].next.clear();
+			nfa_table[row_number * table_width + 1].next.push_back(termination_handler);
 		}
 
 		constexpr auto superimpose_table_row = [
@@ -733,9 +821,12 @@ finished_and_insert_token:
 						consteval
 						-> std::pair<size_t, bool, size_t>
 		{
-			if (token_array_index >= token_array_length) {
+			if (token_array_index == token_array_length) {
 				register_ghost_row(current_row);
 				return { token_array_index, true, current_row };
+			}
+			if (token_array_index > token_array_length) {
+				report_error("moken bug detected: token_array_index exceeded 1-past-token_array in implementation() in generate_nfa_table_from_tokens()");
 			}
 
 			const instanced_token_t &token = token_array[token_array_index];
@@ -797,13 +888,6 @@ finished_and_insert_token:
 				register_ghost_row(current_row);
 				return { token_array_index + 1, true, current_row };
 
-			case token_type_t::MARKER:
-				register_ghost_row(current_row);
-				nfa_table[current_row * table_width].marker = true;
-				size_t next_row = create_new_row();
-				superimpose_ghost_row(current_row, next_row);
-				return self(token_array_index + 1, next_row, current_row, self);
-
 			case token_type_t::TABLE_ROW:
 				size_t next_row = create_new_row();
 				superimpose_table_row(current_row, token.table_row, next_row);
@@ -813,7 +897,7 @@ finished_and_insert_token:
 		};
 
 
-		vector_t<size_t, (uint16_t)-1 - 1> branch_end_rows;
+		vector_t<size_t, (uint16_t)-1> branch_end_rows;
 		size_t next_token_array_index = 0;
 		while (true) {
 			auto [returned_next_token_array_index, should_break_out, returned_end_row] = implementation(next_token_array_index,
@@ -830,17 +914,13 @@ finished_and_insert_token:
 			if (should_break_out) { break; }
 		}
 
-		uint16_t current_termination_handler = 1;	// NOTE: Starting at 1 is necessary because nfa table is zero-ed out.
-		for (size_t end_row : branch_end_rows) {
-			nfa_table[end_row * table_width].termination_handler = current_termination_handler++;
-		}
+		for (uint16_t i = 0; i < decltype(branch_end_rows)::length; i++) { register_terminator(branch_end_rows[i], i); }
 
 		return std::pair(nfa_table, ghost_rows);
 	}
 
 	struct dfa_table_element_t {
 		const dfa_table_element_t *next;
-		size_t markers;
 	};
 
 	template <typename T>
@@ -884,44 +964,94 @@ finished_and_insert_token:
 	template <typename T>
 	concept nfa_table_c = is_nfa_table_v<T>;
 
-	template <auto nfa_table_package, size_t dfa_table_length, uint32_t table_width, size_t possible_states_capacity> requires nfa_table_c<decltype(nfa_table_package)>
+	template <auto nfa_table_package, uint32_t table_width, size_t dfa_table_length, size_t possible_states_capacity>
+	requires nfa_table_c<decltype(nfa_table_package)>
 	consteval auto convert_nfa_to_dfa() {
-		auto nfa_table_container = nfa_table_package.first;
-		auto nfa_ghost_rows = nfa_table_package.second;
-		auto nfa_termination_handlers = nfa_table_package.third;
+		constexpr auto &nfa_table_container = nfa_table_package.first;
+		constexpr auto &nfa_ghost_rows = nfa_table_package.second;
 
 		using instanced_nfa_table_element_t = decltype(nfa_table_container)::type;
 		constexpr size_t nfa_table_1d_length = decltype(nfa_table_container)::length;
 		constexpr size_t nfa_table_length = nfa_table_1d_length / table_width;
 
-		if (nfa_table_length < dfa_table_length) {
-			report_error("moken bug detected: nfa_table_length is smaller than dfa_table_length in convert_nfa_to_dfa()");
-		}
+		static_assert(nfa_table_length >= dfa_table_length, "moken bug detected: nfa_table_length is smaller than dfa_table_length in convert_nfa_to_dfa()");
 
-		const instanced_nfa_table_element_t (&nfa_table)[nfa_table_1d_length] = nfa_table_container.data;
+		constexpr instanced_nfa_table_element_t (&nfa_table)[nfa_table_1d_length] = nfa_table_container.data;
 
 		array_container_t<dfa_table_element_t, dfa_table_length * table_width> dfa_table { };
-		array_container_t<size_t, dfa_table_length> dfa_termination_handlers { };
+		array_contaienr_t<size_t, dfa_table_length> dfa_terminators { };
 		size_t dfa_table_head_row = 0;
 
+		constexpr auto follow_ghost_rows = [
+						    &nfa_table
+						   ]
+						   (
+						    vector_t<size_t, possible_states_capacity> &possible_states,
+						   )
+						   consteval
+		{
+			// NOTE: For myself as future reference, feel free to ignore:
+			// decltype(possible_states) doesn't get you the type that the reference is referring to,
+			// it gets you the type of the reference. So we can't do ::length before we remove the reference.
+			// decltype is more complex than it looks, the following is true, but there are more edge-cases
+			// that you can find in the actual documentation:
+			// 	1. decltype(id_expression) when id_expression refers to an entity:
+			//		--> returns type of entity. This is reasonable since the type of the entity
+			//		is what you want most of the time. The actual evaluation of the id_expression is an lvalue ref,
+			//		but the type of the entity is given to you.
+			//		--> If it's an id_expression that doesn't refer to a valid entity, the program is ill-formed.
+			//	2. decltype(expression):
+			//		--> When it's not an id_expression, the type of expression is given to you.
+			//	3. You can always do decltype((id_expression/expression)) in order to parse the contained expression as
+			//	a normal expression, which won't do that entity stuff that I talked about above.
+			//		--> Interestingly, this probably isn't an explicitly programmed feature in the compiler.
+			//		Rather, the evaluation of (id_expression) probably simply returns an lvalue ref typed normal expression,
+			//		as per the parsing rules of the C++ parser, and since it's a normal expression and it's not identifiable
+			//		as an id_expression anymore, that entity stuff isn't done.
+			//	4. expressions that are prvalues (means pure rvalues AFAIK) have special handling:
+			//		--> The rvalue ref is removed and you get the normal type. As far as I can tell,
+			//		this is simply done because that's the behavior that's the most useful in most cases.
+			//		For example, it's more practical that decltype((2 + 0.1f)) give you float instead of float&&.
+			// TODO: Flesh this out some more.
+
+			// TODO: KEEP GOING FROM HERE
+
+			for (minimum_unsigned_integral_t<possible_states_capacity> i = 0;
+			     i < std::remove_reference_t<decltype(possible_states)>::length;
+			     i++)
+			{
+				size_t state = possible_states[i];
+				if (nfa_ghost_rows[state] == true) {
+					possible_states.pluck(i);
+					if (possible_states.push_back(nfa_table[state * table_width].next) == false) { return false; }
+					i--;
+					continue;
+				}
+			}
+
+			return true;
+		};
+
+		// NOTE: If any of possible_states are ghost rows, this function will throw an error.
 		constexpr auto superimpose_element_next_vector_versions = [
 									   &nfa_table
 									  ]
-									  <
-									   size_t possible_states_buffer_capacity
-									  >
 									  (
-									   // TODO: constraint
-									   const auto &possible_states,
+									   const vector_t<size_t, possible_states_capacity> &possible_states,
 									   size_t row_index
 									  )
 									  consteval
 		{
 			vector_t<size_t, possible_states_buffer_capacity> result;
 			for (size_t state : possible_states) {
-				result.push_back(nfa_table[state * table_width + row_index].next);
+				if (nfa_ghost_rows[state] == true) {
+					report_error("moken bug detected: superimpose_element_next_vector_versions() called with ghost row/s in possible_states");
+				}
+				if (result.push_back(nfa_table[state * table_width + row_index].next) == false) {
+					report_error("moken bug detected: result vector capacity blown in superimpose_element_next_vector_versions()");
+				}
 			}
-			result.remove_duplicates();
+			result.remove_duplicates();	// TODO: implement this
 			return result;
 		};
 
@@ -932,7 +1062,7 @@ finished_and_insert_token:
 						 const auto &self
 						)
 						consteval
-						-> // TODO: return value
+						-> void
 		{
 			const auto possible_states_copy = possible_states;
 			register_dfa_termination_handler(dfa_row, superimpose_termination_handler_versions(possible_states_copy));
@@ -984,8 +1114,13 @@ finished_and_insert_token:
 				self(finished_elements[i], possible_states, self);
 			}
 		};
+		vector_t<size_t, possible_states_capacity> possible_states;
+		if (possible_states.push_back(0) == false) {
+			report_error("moken bug detected: possible_states vector capacity blown in convert_nfa_to_dfa() while seeding");
+		}
+		implementation(create_new_dfa_row(), possible_states, implementation);
 
-		return dfa_table;
+		return std::pair(dfa_table, dfa_terminators);
 	}
 
 	template <size_t dfa_table_1d_length_param>
