@@ -640,7 +640,6 @@ finished_and_insert_token:
 
 		vector_t<size_t, next_vector_capacity> next;
 		bool marker;
-		uint16_t termination_handler;
 	};
 
 	// TODO: fix this, we need to accept the value and not the type
@@ -842,7 +841,6 @@ finished_and_insert_token:
 	struct dfa_table_element_t {
 		const dfa_table_element_t *next;
 		size_t markers;
-		bool is_terminator;
 	};
 
 	template <typename T>
@@ -886,10 +884,11 @@ finished_and_insert_token:
 	template <typename T>
 	concept nfa_table_c = is_nfa_table_v<T>;
 
-	template <auto nfa_table_package, size_t dfa_table_length, uint32_t table_width> requires nfa_table_c<decltype(nfa_table_package)>
+	template <auto nfa_table_package, size_t dfa_table_length, uint32_t table_width, size_t possible_states_capacity> requires nfa_table_c<decltype(nfa_table_package)>
 	consteval auto convert_nfa_to_dfa() {
 		auto nfa_table_container = nfa_table_package.first;
 		auto nfa_ghost_rows = nfa_table_package.second;
+		auto nfa_termination_handlers = nfa_table_package.third;
 
 		using instanced_nfa_table_element_t = decltype(nfa_table_container)::type;
 		constexpr size_t nfa_table_1d_length = decltype(nfa_table_container)::length;
@@ -902,7 +901,8 @@ finished_and_insert_token:
 		const instanced_nfa_table_element_t (&nfa_table)[nfa_table_1d_length] = nfa_table_container.data;
 
 		array_container_t<dfa_table_element_t, dfa_table_length * table_width> dfa_table { };
-		size_t dfa_table_head_row = 1;
+		array_container_t<size_t, dfa_table_length> dfa_termination_handlers { };
+		size_t dfa_table_head_row = 0;
 
 		constexpr auto superimpose_element_next_vector_versions = [
 									   &nfa_table
@@ -928,43 +928,60 @@ finished_and_insert_token:
 		constexpr auto implementation = [&]
 						(
 						 size_t dfa_row,
-						 const auto &possible_states
+						 vector_t<size_t, possible_states_capacity> &possible_states,
 						 const auto &self
 						)
 						consteval
 						-> // TODO: return value
 		{
-			// TODO: markers, create 2D array of lists of markers, which we'll fill up with all the possible marker lists up to this point.
-			// This is because every state has it's own possible marker list up to this point and we need to store all of those.
-			// We can measure out the container though, because the process isn't self-referential like the state process is.
-			// So measure out the container and store the lists and then decide which list to finalize in the table when you reach a stop condition.
-			// Maybe it's not possible, think about it again. These are essentially captures you know.
-			bool finished_elements[table_width];
-			for (size_t j = table_width * dfa_row; j < table_width * current_state + table_width; j++) {
-				if (fin_el == true) { continue; }
+			const auto possible_states_copy = possible_states;
+			register_dfa_termination_handler(dfa_row, superimpose_termination_handler_versions(possible_states_copy));
 
-				auto [possible_states_buffer_j, termination_handler] = superimpose_element_versions<possible_states_buffer_capacity>(possible_states,
-																	possible_states_length,
-																	j - table_width * current_state);
+			const size_t row_offset = dfa_row * table_width;
 
-				finished_elements[j - table_width * dfa_row] = true;
-				dfa_table[j].next = dfa_table_head_row;
-				dfa_table[j].termination_handler = termination_handler;
-				for (size_t k = j + 1; k < table_width * current_state + table_width; k++) {
-					if (fin_el == true) { continue; }
+			// TODO: Do we have the type that we're looking for stored somewhere, cuz then we don't have to find it out here.
+			size_t finished_elements[table_width] { (size_t)-1 };
 
-				auto [possible_states_buffer_k, termination_handler] = superimpose_element_versions<possible_states_buffer_capacity>(possible_states,
-																	possible_states_length,
-																	j - table_width * current_state);
+			{
+				array_container_t<vector_t<size_t, possible_states_capacity>, table_width> possible_states_for_every_element;
+				for (size_t i = 0; i < table_width; i++) {
+					auto &possible_states_of_element = possible_states_for_every_element[i];
+					// TODO: remove row_offset from below
+					superimpose_element_versions(possible_states_copy, possible_states_of_element, i + row_offset);
+				}
 
-					if (possible_states_buffer_j == possible_states_buffer_k) {
-						finished_elements[k - table_width * current_state] = true;
-						dfa_table[k].next = dfa_table_head_row;
-						dfa_table[k].termination_handler = termination_handler;
+				for (size_t i = 0; i < table_width; i++) {
+					if (finished_elements[i] != -1) { continue; }
+
+					size_t target_row = create_new_dfa_row();
+
+					finished_elements[i] = target_row;
+
+					set_dfa_next(dfa_row, i, target_row);
+
+					for (size_t j = i + 1; j < row_offset + table_width; j++) {
+						if (finished_elements[j] != 0) { continue; }
+
+						if (possible_states_for_every_element[i] == possible_states_for_every_element[j]) {
+							finished_elements[j] = target_row;
+							set_dfa_next(dfa_row, j, target_row);
+						}
 					}
 				}
-				self(dfa_table_head_row, possible_states_buffer_j, self);
-				dfa_table_head_row++;
+
+				possible_states = possible_states_for_every_element[0];
+			}
+
+			self(finished_elements[0], possible_states, self);
+			// TODO: For the 1 child case, try disposing possible_states_copy before recursing as well as anything else
+			// you can possibly dispose. For memory savings.
+
+			size_t last_dfa_row = 0;
+			for (minimum_unsigned_t<table_width> i = 1; i < table_width; i++) {
+				if (finished_elements[i] <= last_dfa_row) { continue; }
+				last_dfa_row = finished_elements[i];
+				superimpose_element_versions(possible_states_copy, possible_states, i + row_offset);
+				self(finished_elements[i], possible_states, self);
 			}
 		};
 
