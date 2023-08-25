@@ -107,6 +107,8 @@ namespace moken {
 		consteval iterator_t begin() { return &data; }
 		consteval const_iterator_t begin() const { return &data; }
 
+		// TODO: When things like vector derive from this class, they need a way to override this end() thing.
+		// Figure out a good way to do that.
 		consteval iterator_t end() { return &data + length; }
 		consteval const_iterator_t end() const { return &data + length; }
 	};
@@ -614,11 +616,29 @@ finished_and_insert_token:
 		using storage_size_t = minimum_unsigned_integral_t<capacity>;
 		storage_size_t head;
 
+		// TODO: remove this and just rename head.
+		consteval storage_size_t length() { return head; }
+
 		consteval bool push_back(const element_t &element) {
-			if (head >= capacity) { return false; }
+			if (head == capacity) { return false; }
+			if (head > capacity) {
+				report_error("moken bug detected: vector_t head somehow got bigger than value for capacity, unexpected");
+			}
 			data[head++] = element;
 			return true;
 		}
+
+		// TODO: Make this accept anything that has the necessary properties.
+		// Like compatible_container or whatever we used up at the top.
+		// Make that one more general by moving the requires condition outside of it and into the usage-location in array_container_t.
+		template <size_t other_capacity>
+		consteval bool push_back(const vector_t<element_t, other_capacity> &other) {
+			for (minimum_unsigned_integral_t<other_capacity> i = 0; i < other.length(); i++) {
+				if (push_back(element) == false) { head -= i; return false; }
+			}
+			return true;
+		}
+
 		consteval element_t pop_back() { return std::move(data[--head]); }
 
 		consteval element_t pluck(storage_size_t index) {
@@ -979,11 +999,48 @@ finished_and_insert_token:
 		constexpr instanced_nfa_table_element_t (&nfa_table)[nfa_table_1d_length] = nfa_table_container.data;
 
 		array_container_t<dfa_table_element_t, dfa_table_length * table_width> dfa_table { };
-		array_contaienr_t<size_t, dfa_table_length> dfa_terminators { };
+		array_contaienr_t<uint16_t, dfa_table_length> dfa_terminators { };
 		size_t dfa_table_head_row = 0;
 
+		constexpr auto superimpose_termination_handler_versions = [
+									   &nfa_table,
+									   &nfa_ghost_rows
+									  ]
+									  <
+									   size_t vector_capacity
+									  >
+									  (
+									   const vector_t<size_t, vector_capacity> &possible_states
+									  )
+									  consteval
+									  -> uint32_t
+		{
+			for (const size_t &state : possible_states) {
+				if (nfa_ghost_rows[state] == false) { continue; }
+				if (nfa_table[state * table_width].next.length() != 0) { continue; }
+				return nfa_table[state * table_width + 1].next[0];
+			}
+			return -1;
+		};
+
+		constexpr auto register_dfa_termination_handler = [
+								   &dfa_terminators
+								  ]
+								  (
+								   size_t dfa_row,
+								   uint16_t termination_handler
+								  )
+								  consteval
+		{
+			if (dfa_row >= dfa_table_length) {
+				report_error("moken bug detected: invalid dfa_row passed to register_dfa_termination_handler(), out-of-bounds");
+			}
+			dfa_terminators[dfa_row] = termination_handler;
+		};
+
 		constexpr auto follow_ghost_rows = [
-						    &nfa_table
+						    &nfa_table,
+						    &nfa_ghost_rows
 						   ]
 						   (
 						    vector_t<size_t, possible_states_capacity> &possible_states,
@@ -1012,9 +1069,7 @@ finished_and_insert_token:
 			//		--> The rvalue ref is removed and you get the normal type. As far as I can tell,
 			//		this is simply done because that's the behavior that's the most useful in most cases.
 			//		For example, it's more practical that decltype((2 + 0.1f)) give you float instead of float&&.
-			// TODO: Flesh this out some more.
-
-			// TODO: KEEP GOING FROM HERE
+			//	--> Note that regular rvalues aren't handled like that. Those are returned as-is, which makes sense.
 
 			for (minimum_unsigned_integral_t<possible_states_capacity> i = 0;
 			     i < std::remove_reference_t<decltype(possible_states)>::length;
@@ -1022,6 +1077,7 @@ finished_and_insert_token:
 			{
 				size_t state = possible_states[i];
 				if (nfa_ghost_rows[state] == true) {
+					if (nfa_table[state * table_width].next.length() == 0) { continue; }
 					possible_states.pluck(i);
 					if (possible_states.push_back(nfa_table[state * table_width].next) == false) { return false; }
 					i--;
@@ -1041,18 +1097,53 @@ finished_and_insert_token:
 									   size_t row_index
 									  )
 									  consteval
+									  -> std::pair<size_t, vector_t<size_t, possible_states_capacity>>
 		{
 			vector_t<size_t, possible_states_buffer_capacity> result;
 			for (size_t state : possible_states) {
 				if (nfa_ghost_rows[state] == true) {
 					report_error("moken bug detected: superimpose_element_next_vector_versions() called with ghost row/s in possible_states");
 				}
-				if (result.push_back(nfa_table[state * table_width + row_index].next) == false) {
-					report_error("moken bug detected: result vector capacity blown in superimpose_element_next_vector_versions()");
+				auto next_states = nfa_table[state * table_width + row_index].next;
+				if (follow_ghost_rows(next_states) == false) { return { false, result }; }
+				if (result.push_back(next_states) == false) {
+					result.remove_duplicates();
+					if (result.push_back(next_states) == false) { return { false, result }; }
 				}
 			}
 			result.remove_duplicates();	// TODO: implement this
-			return result;
+			return { true, result };
+		};
+
+		constexpr auto superimpose_element_versions = [
+							       &nfa_table = std::as_const(nfa_table),
+							       &nfa_ghost_rows = std::as_const(nfa_ghost_rows)
+							      ]
+							      <
+							       size_t vector_1_capacity,
+							       size_t vector_2_capacity
+							      >
+							      (
+							       const vector_t<size_t, vector_1_capacity> &possible_states,
+							       vector_t<size_t, vector_2_capacity> &target_buffer,
+							       minimum_unsigned_integral_t<table_width> element_in_row
+							      )
+							      consteval
+		{
+			for (const size_t &state : possible_states) {
+				if (nfa_ghost_rows[state] == true) {
+					if (nfa_table[state * table_width].next.length() == 0) {
+						report_error("moken bug detected: superimpose_element_versions() called with terminator state/s in possible_states");
+					}
+					report_error("moken bug detected: superimpose_element_versions() called with non-terminator ghost row state/s in possible_states");
+				}
+				if (target_buffer.push_back(nfa_table[state * table_width + element_in_row].next) == false) {
+					target_buffer.sort_and_remove_duplicates();
+					if (target_buffer.push_back(nfa_table[state * table_width + element_in_row].next) == false) { return false; }
+				}
+			}
+			target_buffer.sort_and_remove_duplicates();
+			return true;
 		};
 
 		constexpr auto implementation = [&]
@@ -1062,57 +1153,89 @@ finished_and_insert_token:
 						 const auto &self
 						)
 						consteval
-						-> void
+						-> bool
 		{
-			const auto possible_states_copy = possible_states;
-			register_dfa_termination_handler(dfa_row, superimpose_termination_handler_versions(possible_states_copy));
+			if (follow_ghost_rows(possible_states) == false) { return false; }
+			// TODO: Have the below remove the temination ghost rows from the thing as well, so the following code doesn't mess up.
+			uint32_t termination_handler = superimpose_termination_handler_versions(possible_states);
+			// TODO: make sure the conversions do what you want. is it it unsigned->signed->expand or unsigned->expand->signed, cuz that changes things
+			if (termination_handler != -1) { register_dfa_termination_handler(dfa_row, termination_handler); }
 
-			const size_t row_offset = dfa_row * table_width;
-
-			// TODO: Do we have the type that we're looking for stored somewhere, cuz then we don't have to find it out here.
-			size_t finished_elements[table_width] { (size_t)-1 };
-
+			size_t one_child_target_dfa_row;
 			{
-				array_container_t<vector_t<size_t, possible_states_capacity>, table_width> possible_states_for_every_element;
-				for (size_t i = 0; i < table_width; i++) {
-					auto &possible_states_of_element = possible_states_for_every_element[i];
-					// TODO: remove row_offset from below
-					superimpose_element_versions(possible_states_copy, possible_states_of_element, i + row_offset);
-				}
+				auto possible_states_copy = possible_states;
 
-				for (size_t i = 0; i < table_width; i++) {
-					if (finished_elements[i] != -1) { continue; }
+				size_t finished_elements[table_width] { (size_t)-1 };
 
-					size_t target_row = create_new_dfa_row();
+				{
+					array_container_t<vector_t<size_t, possible_states_capacity>, table_width> possible_states_for_every_element;
+					for (size_t i = 0; i < table_width; i++) {
+						auto &possible_states_of_element = possible_states_for_every_element[i];
+						superimpose_element_versions(possible_states, possible_states_of_element, i);
+					}
 
-					finished_elements[i] = target_row;
+					for (size_t i = 0; i < table_width; i++) {
+						if (finished_elements[i] != -1) { continue; }
 
-					set_dfa_next(dfa_row, i, target_row);
+						size_t target_row = create_new_dfa_row();
 
-					for (size_t j = i + 1; j < row_offset + table_width; j++) {
-						if (finished_elements[j] != 0) { continue; }
+						finished_elements[i] = target_row;
 
-						if (possible_states_for_every_element[i] == possible_states_for_every_element[j]) {
-							finished_elements[j] = target_row;
-							set_dfa_next(dfa_row, j, target_row);
+						set_dfa_next(dfa_row, i, target_row);
+
+						for (size_t j = i + 1; j < row_offset + table_width; j++) {
+							if (finished_elements[j] != 0) { continue; }
+
+							if (possible_states_for_every_element[i] == possible_states_for_every_element[j]) {
+								finished_elements[j] = target_row;
+								set_dfa_next(dfa_row, j, target_row);
+							}
 						}
 					}
+
+					possible_states = possible_states_for_every_element[0];
 				}
 
-				possible_states = possible_states_for_every_element[0];
-			}
+				for (minimum_unsigned_integral_t<table_width> i = 1; i < table_width; i++) {
+					if (finished_elements[i] != -1 && finished_elements[i] != finished_elements[0]) { goto for_check_failed; }
+				}
+				// NOTE: This jump is necessary because you can't conditionally end a scope in C++.
+				// In almost all situations, not being able to is fine since the only thing you would do after
+				// ending the scope is either jumping out to other code that doesn't rely on the scope or returning out
+				// of the function. In both situations, the scope is ended by the compiler anyway, so ending it by hand
+				// is useless.
+				// I can think of a very small handful of situations where conditionally ending the scope could come in handy and allow you
+				// to do things you otherwise wouldn't be able to do.
+				// This normally isn't one of those situations, but as far as I'm aware it's only because of compiler optimizations
+				// that are normally applied.
+				// If you call a function and return directly after:
+				// 1. tail call optimization is applied
+				// 2. If that doesn't happen for some reason, the stack should at least be cleaned up (which means scope ends),
+				// before doing the function call.
+				// 3. But none of that is technically guaranteed, those are just optimizations.
+				// Although it would be stupid, the compiler could recurse with a big stack in this situation.
+				// I would never expect it to happen at runtime, but I don't want to take the risk of a barely-optimizing
+				// compile-time interpreter messing things up at compile-time, as could be the case here.
+				// So I've jumped out of the scope before recursing, to ensure that the stack is at least smaller,
+				// even if I can't ensure that it completely goes away before the call.
+				// This incurs a jump, which wouldn't be necessary if I could conditionally end the scope, so it's not the ideal solution,
+				// but I've got no better options AFAIK.
+				one_child_target_dfa_row = finished_elements[0];
+				goto one_child_recurse;
+for_check_failed:
 
-			self(finished_elements[0], possible_states, self);
-			// TODO: For the 1 child case, try disposing possible_states_copy before recursing as well as anything else
-			// you can possibly dispose. For memory savings.
+				self(finished_elements[0], possible_states, self);
 
-			size_t last_dfa_row = 0;
-			for (minimum_unsigned_t<table_width> i = 1; i < table_width; i++) {
-				if (finished_elements[i] <= last_dfa_row) { continue; }
-				last_dfa_row = finished_elements[i];
-				superimpose_element_versions(possible_states_copy, possible_states, i + row_offset);
-				self(finished_elements[i], possible_states, self);
+				size_t last_dfa_row = 0;
+				for (minimum_unsigned_t<table_width> i = 1; i < table_width; i++) {
+					if (finished_elements[i] == -1 || finished_elements[i] <= last_dfa_row) { continue; }
+					last_dfa_row = finished_elements[i];
+					superimpose_element_versions(possible_states_copy, possible_states, i);
+					self(finished_elements[i], possible_states, self);
+				}
 			}
+one_child_recurse:
+			return self(one_child_target_dfa_row, possible_states, self);
 		};
 		vector_t<size_t, possible_states_capacity> possible_states;
 		if (possible_states.push_back(0) == false) {
