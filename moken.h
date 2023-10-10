@@ -93,7 +93,7 @@ namespace moken {
 		// argument and as such cannot use it's non-constexpr member variables in constant-expressions, as would be the case
 		// if we were to try to use it as the length of an array_container_t.
 		// Instead, we have to use the capacity, since that is a constant expression. We'll simply only transfer up to length.
-		{ instance.length } -> std::integral;	// TODO: fix this because ref
+		requires std::integral<decltype(instance.length)>;
 		// I suppose in cases like this, you have to be super careful that a given type doesn't fall into both concepts,
 		// because then the compiler won't know which (for example) constructor to use.
 		// I know there are precedence rules but I don't think any of them would apply here (if we removed the instance.length line).
@@ -110,8 +110,9 @@ namespace moken {
 	// making my explicit version unnecessary. I don't know why that's not happening. All I know is my code doesn't compile
 	// without this.
 	// TODO: compiler bug?
-	template <typename element_t, size_t array_length>
-	array_container_t(const element_t (&)[array_length]) -> array_container_t<element_t, array_length>;
+	//template <typename element_t, size_t array_length>
+	//array_container_t(const element_t (&)[array_length]) -> array_container_t<element_t, array_length>;
+	// TODO: Remove this block if the new compiler doesn't complain.
 
 	// NOTE: Converting from source containers is well and good, but if the source container
 	// is another array_container_t, then we oughta use the default copy constructor, because I assume that's
@@ -897,41 +898,66 @@ namespace moken {
 		vector_t<size_t, next_vector_capacity> next;
 	};
 
-	namespace nfa_construction {
-
-		// NOTE: Originally, we had one function with a bunch of lambdas inside that handled these operations,
-		// but due to what I strongly believe is a compiler bug, we had to abandon the lambdas.
-		// The compiler wouldn't stop forgetting that it was in a compile-time evaluated context,
-		// and kept throwing up errors about how certain variables had unknown values.
-		// Anyway, I guess consteval lambdas were simply too much for it in this case, so we've moved them all
-		// into their own functions.
-
 		// TODO: research how to remove defines after header is finished. There oughta be something we can wrap the header in
 		// so that the defined defines don't leak out into whatever else.
-#define NFA_CREATE_NEW_ROW(...) create_new_row<table_length>(__VA_ARGS__ __VA_OPT__(,) table_head)
-		template <size_t table_length>
-		consteval size_t create_new_row(size_t &table_head) {
+
+	template <array_container_t token_array_container,
+		  size_t table_length,
+		  size_t element_next_vector_capacity,
+		  size_t kleene_stack_capacity>
+	requires token_array_container_t_c<decltype(token_array_container)>
+	consteval auto generate_nfa_from_tokens() {
+		using instanced_token_t = typename decltype(token_array_container)::type;
+		constexpr size_t token_array_length = decltype(token_array_container)::length;
+		// TODO: Why does this compile? It shouldn't right? Since the address isn't known and you can't even use it in for a template parameter. I think this might be another compiler bug.
+		constexpr const instanced_token_t (&token_array)[token_array_length] = token_array_container.data;
+
+		constexpr uint32_t table_width = instanced_token_t::row_length;
+
+		using instanced_nfa_table_element_t = nfa_table_element_t<element_next_vector_capacity>;
+		constexpr size_t nfa_table_1d_length = table_length * table_width;
+		array_container_t<instanced_nfa_table_element_t, nfa_table_1d_length> nfa_table { };
+
+		array_container_t<bool, table_length> ghost_rows { };
+
+		size_t table_head = 0;
+
+		stack_t<size_t, kleene_stack_capacity> kleene_stack;
+
+		constexpr auto create_new_row = [&table_head]() consteval {
 			if (table_head >= table_length) {
 				report_error("moken bug detected: nfa table head overflowed");
 			}
 			return table_head++;
-		}
+		};
 
-#define NFA_REGISTER_GHOST_ROW(...) register_ghost_row(__VA_ARGS__ __VA_OPT__(,) ghost_rows, table_head)
-		consteval void register_ghost_row(size_t row_number, auto &ghost_rows, const size_t &table_head) {
+		constexpr auto register_ghost_row = [
+						     &ghost_rows,
+						     &table_head = std::as_const(table_head)
+						    ]
+						    (
+						     size_t row_number
+						    )
+						    consteval
+		{
+			// TODO: Create shortcut to select last selection, or figure out how to do it, because that will come in
+			// handy when trying to indent something you just pasted.
 			if (row_number >= table_head) {
 				report_error("moken bug detected: register_ghost_row() called with out-of-bounds row_number");
 			}
 			ghost_rows[row_number] = true;
-		}
+		};
 
-#define NFA_REGISTER_TERMINATOR(...) register_terminator<table_width>(__VA_ARGS__ __VA_OPT__(,) nfa_table, ghost_rows, table_head)
-		template <uint32_t table_width>
-		consteval void register_terminator(size_t row_number,
-						   uint16_t termination_handler,
-						   auto &nfa_table,
-						   const auto &ghost_rows,
-						   const auto &table_head)
+		constexpr auto register_terminator = [
+						      &nfa_table,
+						      &ghost_rows = std::as_const(ghost_rows),
+						      &table_head
+						     ]
+						     (
+						      size_t row_number,
+						      uint16_t termination_handler
+						     )
+						     consteval
 		{
 			if (row_number >= table_head) {
 				report_error("moken bug detected: register_terminator() called with out-of-bounds row_number");
@@ -942,14 +968,17 @@ namespace moken {
 			nfa_table[row_number * table_width].next.clear();
 			nfa_table[row_number * table_width + 1].next.clear();
 			nfa_table[row_number * table_width + 1].next.push_back(termination_handler);
-		}
+		};
 
-#define NFA_SUPERIMPOSE_TABLE_ROW(...) superimpose_table_row<table_width, instanced_token_t, instanced_nfa_table_element_t>(__VA_ARGS__ __VA_OPT__(,) nfa_table)
-		template <uint32_t table_width, typename instanced_token_t, typename instanced_nfa_table_element_t>
-		consteval void superimpose_table_row(size_t row_number,
-							 const bool (&row)[table_width],
-							 size_t target_row_number,
-							 auto &nfa_table)
+		constexpr auto superimpose_table_row = [
+							&nfa_table
+						       ]
+						       (
+							size_t row_number,
+							const bool (&row)[table_width],
+							size_t target_row_number
+						       )
+						       consteval
 		{
 			const size_t row_offset = row_number * table_width;
 
@@ -961,14 +990,17 @@ namespace moken {
 					report_error("moken bug detected: nfa element next vector capacity blown while superimposing non-ghost row");
 				}
 			}
-		}
+		};
 
-#define NFA_SUPERIMPOSE_GHOST_ROW(...) superimpose_ghost_row<table_width>(__VA_ARGS__ __VA_OPT__(,) nfa_table, ghost_rows)
-		template <uint32_t table_width>
-		consteval void superimpose_ghost_row(size_t row_number,
-						     size_t target_row_number,
-						     auto &nfa_table,
-						     const auto &ghost_rows)
+		constexpr auto superimpose_ghost_row = [
+							&nfa_table,
+							&ghost_rows = std::as_const(ghost_rows)
+						       ]
+						       (
+							size_t row_number,
+							size_t target_row_number
+						       )
+						       consteval
 		{
 			const size_t row_offset = row_number * table_width;
 
@@ -979,26 +1011,19 @@ namespace moken {
 			if (nfa_table[row_offset].next.push_back(target_row_number) == false) {
 				report_error("moken bug detected: nfa element next vector capacity blown while superimposing ghost row");
 			}
-		}
+		};
 
-#define NFA_IMPLEMENTATION_RECURSE(...) implementation<table_width, table_length, element_next_vector_capacity, token_array_length, instanced_token_t, instanced_nfa_table_element_t>(__VA_ARGS__ __VA_OPT__(,) nfa_table, table_head, ghost_rows, kleene_stack, token_array)
-		template <uint32_t table_width,
-			  size_t table_length,
-			  size_t element_next_vector_capacity,
-			  size_t token_array_length,
-			  typename instanced_token_t,
-			  typename instanced_nfa_table_element_t>
-		consteval std::tuple<size_t, bool, size_t> implementation(size_t token_array_index,
-									  size_t current_row,
-									  size_t last_table_row,
-									  auto &nfa_table,
-									  auto &table_head,
-									  auto &ghost_rows,
-									  auto &kleene_stack,
-									  const auto &token_array)
+		constexpr auto implementation = [&]
+						(
+						 size_t token_array_index,
+						 size_t current_row,
+						 size_t last_table_row,
+						 const auto &self
+						)
+						consteval
 		{
 			if (token_array_index == token_array_length) {
-				NFA_REGISTER_GHOST_ROW(current_row);
+				register_ghost_row(current_row);
 				return { token_array_index, true, current_row };
 			}
 			if (token_array_index > token_array_length) {
@@ -1009,17 +1034,17 @@ namespace moken {
 			switch (token.type) {
 
 			case token_type_t::ALTERNATION:
-				NFA_REGISTER_GHOST_ROW(current_row);
+				register_ghost_row(current_row);
 				return { token_array_index + 1, false, current_row };
 
 			case token_type_t::KLEENE_CLOSURE_BEGIN:
 				kleene_stack.push(current_row);
-				return NFA_IMPLEMENTATION_RECURSE(token_array_index + 1, current_row, last_table_row);
+				return self(token_array_index + 1, current_row, last_table_row, self);
 
 			case token_type_t::KLEENE_CLOSURE_END:
 				{
-					NFA_REGISTER_GHOST_ROW(current_row);
-					NFA_SUPERIMPOSE_GHOST_ROW(current_row, kleene_stack.pop());
+					register_ghost_row(current_row);
+					superimpose_ghost_row(current_row, kleene_stack.pop());
 					// NOTE: This and many other things aren't working now because the compiler is still
 					// forgetting that this is a compile-time context.
 					// table_head is a reference to a variable in the calling compile-time function.
@@ -1030,27 +1055,28 @@ namespace moken {
 					// but I'm gonna have to give it some thought.
 					// Maybe I'll just wait a year or two until the compiler has gotten better and try to compile
 					// it again or something.
-					size_t next_row = NFA_CREATE_NEW_ROW();
-					NFA_SUPERIMPOSE_GHOST_ROW(current_row, next_row);
-					return NFA_IMPLEMENTATION_RECURSE(token_array_index + 1, next_row, current_row);
+					size_t next_row = create_new_row();
+					superimpose_ghost_row(current_row, next_row);
+					return self(token_array_index + 1, next_row, current_row, self);
 				}
 
 			case token_type_t::SUBEXPRESSION_BEGIN:
 				{
-					NFA_REGISTER_GHOST_ROW(current_row);
+					register_ghost_row(current_row);
 
 					vector_t<size_t, element_next_vector_capacity> branch_end_rows;
 
 					size_t new_token_array_index = token_array_index + 1;
 
 					while (true) {
-						const size_t target_row = NFA_CREATE_NEW_ROW();
-						NFA_SUPERIMPOSE_GHOST_ROW(current_row, target_row);
+						const size_t target_row = create_new_row();
+						superimpose_ghost_row(current_row, target_row);
 						const auto [returned_token_array_index,
 							    should_break_out,
-							    returned_end_row] = NFA_IMPLEMENTATION_RECURSE(new_token_array_index,
+							    returned_end_row] = self(new_token_array_index,
 										     target_row,
-										     current_row);
+										     current_row,
+										     self);
 
 						if (branch_end_rows.push_back(returned_end_row) == false) {
 							report_error("moken bug detected: branch_end_rows capacity blown in nfa gen SUBEXPRESSION_BEGIN");
@@ -1061,76 +1087,51 @@ namespace moken {
 						if (should_break_out) { break; }
 					}
 
-					const size_t ghost_sink = NFA_CREATE_NEW_ROW();
-					NFA_REGISTER_GHOST_ROW(ghost_sink);
+					const size_t ghost_sink = create_new_row();
+					register_ghost_row(ghost_sink);
 					for (size_t i = 0; i < branch_end_rows.length; i++) {
-						NFA_SUPERIMPOSE_GHOST_ROW(branch_end_rows[i], ghost_sink);
+						superimpose_ghost_row(branch_end_rows[i], ghost_sink);
 					}
 
-					const size_t next_row = NFA_CREATE_NEW_ROW();
-					NFA_SUPERIMPOSE_GHOST_ROW(ghost_sink, next_row);
-					return NFA_IMPLEMENTATION_RECURSE(new_token_array_index, next_row, ghost_sink);
+					const size_t next_row = create_new_row();
+					superimpose_ghost_row(ghost_sink, next_row);
+					return self(new_token_array_index, next_row, ghost_sink, self);
 				}
 
 			case token_type_t::SUBEXPRESSION_END:
-				NFA_REGISTER_GHOST_ROW(current_row);
+				register_ghost_row(current_row);
 				return { token_array_index + 1, true, current_row };
 
 			case token_type_t::TABLE_ROW:
 				{
-					size_t next_row = NFA_CREATE_NEW_ROW();
-					NFA_SUPERIMPOSE_TABLE_ROW(current_row, token.table_row, next_row);
-					return NFA_IMPLEMENTATION_RECURSE(token_array_index + 1, next_row, current_row);
+					size_t next_row = create_new_row();
+					superimpose_table_row(current_row, token.table_row, next_row);
+					return self(token_array_index + 1, next_row, current_row, self);
 				}
 
 			}
+		};
+
+			// TODO: Go through code and see where else you can use that minimum_unsigned_integral_t thing.
+
+		vector_t<size_t, (uint16_t)-1> branch_end_rows;
+		size_t next_token_array_index = 0;
+		while (true) {
+			auto [returned_next_token_array_index, should_break_out, returned_end_row] = implementation(next_token_array_index, 0, -1, implementation);
+			if (branch_end_rows.push_back(returned_end_row) == false) {
+				// TODO: Check that this number doesn't exceed before-hand as form of user input validation.
+				// At this stage, it IS a bug, if it hasn't been caught already.
+				report_error("moken bug detected: top-level branch_end_rows vector length exceeded capacity while building nfa");
+			}
+			next_token_array_index = returned_next_token_array_index;
+			if (should_break_out) { break; }
 		}
 
-		template <array_container_t token_array_container,
-			  size_t table_length,
-			  size_t element_next_vector_capacity,
-			  size_t kleene_stack_capacity>
-		requires token_array_container_t_c<decltype(token_array_container)>
-		consteval auto generate_from_tokens() {
-			using instanced_token_t = typename decltype(token_array_container)::type;
-			constexpr size_t token_array_length = decltype(token_array_container)::length;
-			// TODO: Why does this compile? It shouldn't right? Since the address isn't known and you can't even use it in for a template parameter. I think this might be another compiler bug.
-			constexpr const instanced_token_t (&token_array)[token_array_length] = token_array_container.data;
-
-			constexpr uint32_t table_width = instanced_token_t::row_length;
-
-			using instanced_nfa_table_element_t = nfa_table_element_t<element_next_vector_capacity>;
-			constexpr size_t nfa_table_1d_length = table_length * table_width;
-			array_container_t<instanced_nfa_table_element_t, nfa_table_1d_length> nfa_table { };
-
-			array_container_t<bool, table_length> ghost_rows { };
-
-			size_t table_head = 0;
-
-			stack_t<size_t, kleene_stack_capacity> kleene_stack;
-
-				// TODO: Go through code and see where else you can use that minimum_unsigned_integral_t thing.
-
-			vector_t<size_t, (uint16_t)-1> branch_end_rows;
-			size_t next_token_array_index = 0;
-			while (true) {
-				auto [returned_next_token_array_index, should_break_out, returned_end_row] = NFA_IMPLEMENTATION_RECURSE(next_token_array_index, 0, -1);
-				if (branch_end_rows.push_back(returned_end_row) == false) {
-					// TODO: Check that this number doesn't exceed before-hand as form of user input validation.
-					// At this stage, it IS a bug, if it hasn't been caught already.
-					report_error("moken bug detected: top-level branch_end_rows vector length exceeded capacity while building nfa");
-				}
-				next_token_array_index = returned_next_token_array_index;
-				if (should_break_out) { break; }
-			}
-
-			for (uint16_t i = 0; i < branch_end_rows.length; i++) {
-				NFA_REGISTER_TERMINATOR(branch_end_rows[i], i);
-			}
-
-			return std::pair(nfa_table, ghost_rows);
+		for (uint16_t i = 0; i < branch_end_rows.length; i++) {
+			register_terminator(branch_end_rows[i], i);
 		}
 
+		return std::pair(nfa_table, ghost_rows);
 	}
 
 	// TODO: Add check to make sure when extra null is selected that the last thing really is a NUL character.
@@ -1161,7 +1162,7 @@ namespace moken {
 		constexpr size_t element_next_vector_capacity = get<2>(table_metrics);
 		constexpr size_t kleene_stack_capacity = get<3>(table_metrics);
 
-		constexpr auto nfa_table = nfa_construction::generate_from_tokens<token_array,
+		constexpr auto nfa_table = generate_nfa_from_tokens<token_array,
 			  						  nfa_max_rows,
 									  element_next_vector_capacity,
 									  kleene_stack_capacity>();
