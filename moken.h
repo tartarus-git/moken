@@ -110,9 +110,8 @@ namespace moken {
 	// making my explicit version unnecessary. I don't know why that's not happening. All I know is my code doesn't compile
 	// without this.
 	// TODO: compiler bug?
-	//template <typename element_t, size_t array_length>
-	//array_container_t(const element_t (&)[array_length]) -> array_container_t<element_t, array_length>;
-	// TODO: Remove this block if the new compiler doesn't complain.
+	template <typename element_t, size_t array_length>
+	array_container_t(const element_t (&)[array_length]) -> array_container_t<element_t, array_length>;
 
 	// NOTE: Converting from source containers is well and good, but if the source container
 	// is another array_container_t, then we oughta use the default copy constructor, because I assume that's
@@ -924,14 +923,22 @@ namespace moken {
 
 		stack_t<size_t, kleene_stack_capacity> kleene_stack;
 
-		constexpr auto create_new_row = [&table_head]() consteval {
+		// NOTE: You can't write constexpr in front of auto for these lambdas because that would mean that the whole
+		// lambda class instance is constexpr, which would mean that the reference to table_head is constant expression,
+		// which it cannot be in this situation. That means we can't write constexpr, because the instance cannot be constexpr.
+		// The operator() can be consteval, but the instance cannot be constexpr.
+		// Obviously, if the capture is empty then you can write constexpr, because the class instance can very well be constant
+		// expression.
+		// TODO: Think about this a bit more. Does the fact that the capture variables are private inside the class matter in any way?
+
+		auto create_new_row = [&table_head]() consteval {
 			if (table_head >= table_length) {
 				report_error("moken bug detected: nfa table head overflowed");
 			}
 			return table_head++;
 		};
 
-		constexpr auto register_ghost_row = [
+		auto register_ghost_row = [
 						     &ghost_rows,
 						     &table_head = std::as_const(table_head)
 						    ]
@@ -948,7 +955,7 @@ namespace moken {
 			ghost_rows[row_number] = true;
 		};
 
-		constexpr auto register_terminator = [
+		auto register_terminator = [
 						      &nfa_table,
 						      &ghost_rows = std::as_const(ghost_rows),
 						      &table_head
@@ -970,7 +977,7 @@ namespace moken {
 			nfa_table[row_number * table_width + 1].next.push_back(termination_handler);
 		};
 
-		constexpr auto superimpose_table_row = [
+		auto superimpose_table_row = [
 							&nfa_table
 						       ]
 						       (
@@ -992,7 +999,7 @@ namespace moken {
 			}
 		};
 
-		constexpr auto superimpose_ghost_row = [
+		auto superimpose_ghost_row = [
 							&nfa_table,
 							&ghost_rows = std::as_const(ghost_rows)
 						       ]
@@ -1013,7 +1020,7 @@ namespace moken {
 			}
 		};
 
-		constexpr auto implementation = [&]
+		auto implementation = [&]
 						(
 						 size_t token_array_index,
 						 size_t current_row,
@@ -1021,6 +1028,7 @@ namespace moken {
 						 const auto &self
 						)
 						consteval
+						-> std::tuple<size_t, bool, size_t>
 		{
 			if (token_array_index == token_array_length) {
 				register_ghost_row(current_row);
