@@ -1053,16 +1053,6 @@ namespace moken {
 				{
 					register_ghost_row(current_row);
 					superimpose_ghost_row(current_row, kleene_stack.pop());
-					// NOTE: This and many other things aren't working now because the compiler is still
-					// forgetting that this is a compile-time context.
-					// table_head is a reference to a variable in the calling compile-time function.
-					// I obviously can't use it as a template parameter, but I know I can input it into
-					// the call to another consteval function as a function argument.
-					// This should be working, but it isn't.
-					// To work around this compiler bug, I'm gonna have to redesign the system somehow,
-					// but I'm gonna have to give it some thought.
-					// Maybe I'll just wait a year or two until the compiler has gotten better and try to compile
-					// it again or something.
 					size_t next_row = create_new_row();
 					superimpose_ghost_row(current_row, next_row);
 					return self(token_array_index + 1, next_row, current_row, self);
@@ -1125,7 +1115,10 @@ namespace moken {
 		vector_t<size_t, (uint16_t)-1> branch_end_rows;
 		size_t next_token_array_index = 0;
 		while (true) {
-			auto [returned_next_token_array_index, should_break_out, returned_end_row] = implementation(next_token_array_index, 0, -1, implementation);
+			auto [returned_next_token_array_index, should_break_out, returned_end_row] = implementation(next_token_array_index,
+														    0,
+														    -1,
+														    implementation);
 			if (branch_end_rows.push_back(returned_end_row) == false) {
 				// TODO: Check that this number doesn't exceed before-hand as form of user input validation.
 				// At this stage, it IS a bug, if it hasn't been caught already.
