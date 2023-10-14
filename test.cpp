@@ -2,7 +2,7 @@
 #include <iostream>
 
 int main() {
-	moken::make_tokenizer_t<moken::array_container_t("(hi|((bye)))*end")>();
+	constexpr auto nfa_table = moken::make_tokenizer_t<moken::array_container_t("(hi|((bye)))*end")>();
 	/*for (auto token : token_array) {
 		switch (token.type) {
 		case moken::token_type_t::ALTERNATION: std::cout << "alternation\n"; break;
@@ -13,4 +13,11 @@ int main() {
 		case moken::token_type_t::TABLE_ROW: std::cout << "table row\n"; break;
 		}
 	}*/
+
+	for (size_t i = 0; i < decltype(nfa_table.first)::length; i += decltype(nfa_table.first)::length / decltype(nfa_table.second)::length) {
+		for (size_t j = i; j < i + decltype(nfa_table.first)::length / decltype(nfa_table.second)::length; j++) {
+			std::cout << " " << nfa_table.first[j].next[0] << " ";
+		}
+		std::cout << '\n';
+	}
 }

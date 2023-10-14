@@ -395,6 +395,8 @@ namespace moken {
 	};
 
 	// TODO: See if you can remove the container stuff when the stuff isn't in a lambda
+	// TODO: Instead of putting spec type through to here, just create a new specification_container in the caller and pass that,
+	// no NULL guaranteed.
 	template <array_container_t specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
 	requires compatible_array_container_t_c<decltype(specification_container)>
 	consteval size_t calculate_token_array_length() {
@@ -422,7 +424,8 @@ namespace moken {
 				i++;
 				for (; specification[i] != ']'; i++) { }
 				break;
-			case '\\': result++; i++; break;
+			case '\\': i++;
+			/* FALLTHROUGH */
 			case '.':
 			/* FALLTHROUGH */
 			default: result++; break;
@@ -664,7 +667,7 @@ namespace moken {
 
 		size_t token_array_index = 0;
 
-		auto implementation = [&](const auto &self) constexpr -> void {
+		auto implementation = [&](const auto &self) consteval -> void {
 			size_t current_next_vector_capacity = 1;
 
 			for (; token_array_index < token_array_length; token_array_index++) {
@@ -680,11 +683,11 @@ namespace moken {
 					}
 					break;
 
-				case token_type_t::KLEENE_CLOSURE_END: max_nested_kleene_closures--; nfa_max_rows++; break;
+				case token_type_t::KLEENE_CLOSURE_END: current_nested_kleene_closures--; nfa_max_rows++; break;
 
 				case token_type_t::SUBEXPRESSION_BEGIN:
 					token_array_index++;
-					nfa_max_rows++;
+					nfa_max_rows += 2;	// NOTE: One ghost row at start, one at end.
 					self(self);
 					break;
 
@@ -692,8 +695,7 @@ namespace moken {
 					if (current_next_vector_capacity > max_next_vector_capacity) {
 						max_next_vector_capacity = current_next_vector_capacity;
 					}
-					token_array_index++;
-					nfa_max_rows++;
+					nfa_max_rows++;		// NOTE: One ghost row at end of current subpath.
 					return;
 
 				case token_type_t::TABLE_ROW: nfa_max_rows++; dfa_max_rows++; break;
@@ -702,6 +704,8 @@ namespace moken {
 			}
 		};
 		implementation(implementation);
+
+		nfa_max_rows++;		// NOTE: Because of last ghost row needed for last subpath in top-level alternation set.
 
 		return { nfa_max_rows, dfa_max_rows, max_next_vector_capacity, max_nested_kleene_closures };
 	}
@@ -757,9 +761,11 @@ namespace moken {
 	// We can move from the internal array and turn right back around and copy a new value into the slot.
 	// Lifetime never ended, everythings good.
 
-	template <typename element_t, size_t capacity>
-	class vector_t : private array_container_t<element_t, capacity> {
+	template <typename element_t, size_t capacity_param>
+	class vector_t : private array_container_t<element_t, capacity_param> {
 	public:
+		static constexpr size_t capacity = capacity_param;
+
 		using typename array_container_t<element_t, capacity>::iterator_t;
 		using typename array_container_t<element_t, capacity>::const_iterator_t;
 
@@ -1046,7 +1052,9 @@ namespace moken {
 				return { token_array_index + 1, false, current_row };
 
 			case token_type_t::KLEENE_CLOSURE_BEGIN:
-				kleene_stack.push(current_row);
+				if (kleene_stack.push(current_row) == false) {
+					report_error("TODO: Write bug error message about how kleene stack was blown");
+				}
 				return self(token_array_index + 1, current_row, last_table_row, self);
 
 			case token_type_t::KLEENE_CLOSURE_END:
@@ -1114,9 +1122,10 @@ namespace moken {
 
 		vector_t<size_t, (uint16_t)-1> branch_end_rows;
 		size_t next_token_array_index = 0;
+		const size_t first_row = create_new_row();
 		while (true) {
 			auto [returned_next_token_array_index, should_break_out, returned_end_row] = implementation(next_token_array_index,
-														    0,
+														    first_row,
 														    -1,
 														    implementation);
 			if (branch_end_rows.push_back(returned_end_row) == false) {
@@ -1136,6 +1145,8 @@ namespace moken {
 	}
 
 	// TODO: Add check to make sure when extra null is selected that the last thing really is a NUL character.
+	// TODO: Better yet, make it select EXTRA NULL automatically when it sees a null and not when it doesn't.
+	// You can override the behavior by setting spec type explicitly I guess. Is that a good idea or is it confusing?
 	template <array_container_t specification, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
 	requires sufficiently_compatible_array_container_t_c<decltype(specification)>
 	consteval auto make_tokenizer_t() {
@@ -1158,10 +1169,10 @@ namespace moken {
 			       ]
 			       = calculate_table_metrics<token_array>();*/
 		constexpr auto table_metrics = calculate_table_metrics<token_array>();
-		constexpr size_t nfa_max_rows = get<0>(table_metrics);
-		constexpr size_t dfa_max_rows = get<1>(table_metrics);
-		constexpr size_t element_next_vector_capacity = get<2>(table_metrics);
-		constexpr size_t kleene_stack_capacity = get<3>(table_metrics);
+		constexpr size_t nfa_max_rows = std::get<0>(table_metrics);
+		constexpr size_t dfa_max_rows = std::get<1>(table_metrics);
+		constexpr size_t element_next_vector_capacity = std::get<2>(table_metrics);
+		constexpr size_t kleene_stack_capacity = std::get<3>(table_metrics);
 
 		constexpr auto nfa_table = generate_nfa_from_tokens<token_array,
 			  						  nfa_max_rows,
