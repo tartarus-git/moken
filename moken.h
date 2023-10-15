@@ -211,17 +211,20 @@ namespace moken {
 			return *this;
 		}
 
-		consteval element_t& operator[](size_t index) { return data[index]; }
-		consteval const element_t& operator[](size_t index) const { return data[index]; }
+		// NOTE: The following functions are constexpr so that you can use them from runtime as well.
+		// Useful for the table jumper algorithm that uses the table at runtime and also for debugging.
+
+		constexpr element_t& operator[](size_t index) noexcept { return data[index]; }
+		constexpr const element_t& operator[](size_t index) const noexcept { return data[index]; }
 
 		using iterator_t = element_t*;
 		using const_iterator_t = const element_t*;
 
-		constexpr iterator_t begin() { return data; }
-		constexpr const_iterator_t begin() const { return data; }
+		constexpr iterator_t begin() noexcept { return data; }
+		constexpr const_iterator_t begin() const noexcept { return data; }
 
-		constexpr iterator_t end() { return data + length; }
-		constexpr const_iterator_t end() const { return data + length; }
+		constexpr iterator_t end() noexcept { return data + length; }
+		constexpr const_iterator_t end() const noexcept { return data + length; }
 	};
 
 	// NOTE: This whole compatible/sufficiently_compatible business is basically just this:

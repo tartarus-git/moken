@@ -16,8 +16,16 @@ int main() {
 
 	for (size_t i = 0; i < decltype(nfa_table.first)::length; i += decltype(nfa_table.first)::length / decltype(nfa_table.second)::length) {
 		for (size_t j = i; j < i + decltype(nfa_table.first)::length / decltype(nfa_table.second)::length; j++) {
-			std::cout << " " << nfa_table.first[j].next[0] << " ";
+			std::cout << " {";
+			for (size_t k = 0; k < decltype(nfa_table.first)::type::next_vector_capacity; k++) {
+				std::cout << ":" << nfa_table.first[j].next[k] << ":";
+			}
+			std::cout << "} ";
 		}
 		std::cout << '\n';
+	}
+
+	for (size_t i = 0; i < decltype(nfa_table.second)::length; i++) {
+		std::cout << nfa_table.second[i] << '\n';
 	}
 }
