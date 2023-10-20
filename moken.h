@@ -7,6 +7,7 @@
 #include <concepts>
 #include <type_traits>
 // TODO: Check to make sure we need all these headers
+#include <algorithm>
 
 namespace moken {
 
@@ -36,6 +37,9 @@ namespace moken {
 
 	template <typename U, typename V>
 	concept same_as_c = (are_types_same_v<U, V>);
+
+	template <typename T>
+	using remove_const_and_ref_t = std::remove_const_t<std::remove_reference_t<T>>;
 
 	template <auto value>
 	inline constexpr bool is_at_least_one_v = (value >= 1);
@@ -769,6 +773,16 @@ namespace moken {
 	// We can move from the internal array and turn right back around and copy a new value into the slot.
 	// Lifetime never ended, everythings good.
 
+	template <typename T>
+	concept sortable_element_c = requires(T first, T second) {
+		{ first < second } -> same_as_c<bool>;
+	};
+
+	template <typename T>
+	concept equatable_element_c = requires(T first, T second) {
+		{ first == second } -> same_as_c<bool>;
+	};
+
 	template <typename element_t, size_t capacity_param>
 	class vector_t : private array_container_t<element_t, capacity_param> {
 	public:
@@ -790,6 +804,22 @@ namespace moken {
 		using storage_size_t = minimum_unsigned_integral_t<capacity>;
 		storage_size_t length = 0;
 
+		consteval vector_t() = default;
+
+		consteval vector_t(const vector_t<element_t, capacity_param> &other)
+		: array_container_t<element_t, capacity>(other), length(other.length)
+		{ }
+
+		// TODO: Add vector_t type transmitting constructor for general containers as well.
+
+		template <typename other_element_t, size_t other_capacity>
+		requires implicitly_convertible_to_x_type_c<other_element_t, element_t> && (other_capacity <= capacity)
+		consteval vector_t(const vector_t<other_element_t, other_capacity> &other)
+		: array_container_t<element_t, capacity>(other), length(other.length)
+		{ }
+
+		// TODO: Add vector_t type comparing constructor for general containers.
+
 		template <typename other_element_t, size_t other_capacity>
 		requires implicitly_convertible_to_x_type_c<other_element_t, element_t> && (other_capacity <= capacity)
 		consteval vector_t& operator=(const vector_t<other_element_t, other_capacity> &other) {
@@ -805,6 +835,30 @@ namespace moken {
 			overlay_other_container(source);
 			length = source_container_t::length;
 			return *this;
+		}
+
+		template <typename other_element_t, size_t other_capacity>
+			// TODO: Think about if you want this to be a type error or a compile-time value return error situation.
+			// It's interesting that you can lower the error to the level that you want it in.
+		requires implicitly_convertible_to_x_type_c<element_t, other_element_t>
+		|| implicitly_convertible_to_x_type_c<other_element_t, element_t>
+		// NOTE: C++20 and above assumes that a == b is true exactly when b == a is true, and as such one operator== function can supply the implementation
+		// for both a == b and b == a. Basically, the arguments are also tried in reverse order when finding an operator==.
+		// Because of this, you can get ambigiouities. For example if I left out the const at the end of the below line,
+		// then both argument orders would have different meanings when matching with this function, and they will both match with this function.
+		// Those two meanings have the same precedence, hence ambigiouity. The tie-breaker is to go with the non-reversed order, so everythings
+		// fine, but you will get a warning. You really should avoid this warning though because it's more elegant.
+		// As far as I can tell, the only reason it's a warning and not an error is to preserve as much backwards-compatibility as possible.
+		// Preserving all of it is impossible though. This change in assumption for the == operator introduces a breaking change,
+		// which is unfortunate.
+		// TODO: Check that note is okay.
+		consteval bool operator==(const vector_t<other_element_t, other_capacity> &other) const {
+			if (length != other.length) { return false; }
+			const_iterator_t other_ptr = other.begin();
+			for (const_iterator_t ptr = begin(); ptr < end(); ptr++) {
+				if (*ptr != *other_ptr) { return false; }
+			}
+			return true;
 		}
 
 		consteval bool push_back(const element_t &element) {
@@ -854,6 +908,43 @@ namespace moken {
 			// There are edge-cases, like when the whole function body consists of one return statement,
 			// where I'm pretty sure compile-time also does the optimizations, because they're guaranteed
 			// at runtime as well, but I'm not too sure. Better check the documentation to be sure.
+		}
+
+		// TODO: Add error handling and bounds checking and all that to all of these functions in this class and in others that don't
+		// have it yet.
+
+		consteval element_t pluck(iterator_t ptr) {
+			element_t result = std::move(*ptr);
+			length--;		// TODO: Something wrong here, fix.
+			for (; ptr < end(); ptr++) { *ptr = *(ptr + 1); }
+			return result;
+		}
+
+		consteval void sort()
+		requires sortable_element_c<element_t>
+		{
+			std::sort(begin(), end(), [](const element_t &a, const element_t &b) consteval { return a < b; });
+		}
+
+		consteval void sort_and_remove_duplicates()
+		requires equatable_element_c<element_t>
+		{
+			sort();
+			const_iterator_t previous_element_ptr = begin();
+			for (iterator_t ptr = begin(); ptr < end(); ptr++) {
+				while (true) {
+					if (*ptr == *previous_element_ptr) {
+						pluck(ptr);
+						// NOTE: I wanted to use ptr-- to make sure the next iteration refers to the correct element,
+						// but that doesn't work when ptr == 0 because having ptr one (or any number of units) below an object
+						// is UB. TODO: Expand on this note.
+						//ptr--;
+						continue;
+					}
+					previous_element_ptr = ptr;
+					break;
+				}
+			}
 		}
 
 		consteval void clear() { length = 0; }
@@ -1176,41 +1267,42 @@ namespace moken {
 	concept nfa_table_element_t_c = is_nfa_table_element_t_v<T>;
 
 	template <typename T>
-	concept nfa_table_row_container_c = array_container_t_c<T> && nfa_table_element_t_c<typename T::type>;
+	concept nfa_table_container_c = array_container_t_c<T> && nfa_table_element_t_c<typename T::type>;
 
-	template <typename T>
+	template <uint32_t table_width, typename T>
 	class is_nfa_table {
 	public:
 		static constexpr bool value = false;
 		consteval operator bool() const { return value; }
 	};
-	template <nfa_table_row_container_c nfa_table_row_container_t>
-		// TODO: This has a bug where it doesn't accept what we want it to accept.
-		// It's caused by the below line. Fix it.
-	class is_nfa_table<std::pair<nfa_table_row_container_t, array_container_t<bool, nfa_table_row_container_t::length>>> {
+	template <uint32_t table_width, nfa_table_container_c nfa_table_container_t>
+	class is_nfa_table<table_width, std::pair<nfa_table_container_t, array_container_t<bool, nfa_table_container_t::length / table_width>>> {
 	public:
 		static constexpr bool value = true;
 		consteval operator bool() const { return value; }
 	};
 
-	template <typename T>
-	inline constexpr bool is_nfa_table_v = is_nfa_table<T>::value;
+	template <uint32_t table_width, typename T>
+	inline constexpr bool is_nfa_table_v = is_nfa_table<table_width, T>::value;
 
-	template <typename T>
-	concept nfa_table_c = is_nfa_table_v<T>;
+	template <typename T, uint32_t table_width>
+	concept nfa_table_c = is_nfa_table_v<table_width, T>;
 
-	template <auto nfa_table_package, uint32_t table_width, size_t dfa_table_length, size_t possible_states_capacity>
-	requires nfa_table_c<decltype(nfa_table_package)>
+	template <const auto &nfa_table_package, uint32_t table_width, size_t dfa_table_length, size_t possible_states_capacity>
+	requires nfa_table_c<remove_const_and_ref_t<decltype(nfa_table_package)>, table_width>
+	&& (possible_states_capacity >= decltype(nfa_table_package.first)::type::next_vector_capacity)
 	consteval std::tuple<bool,
 		  	     array_container_t<dfa_table_element_t, dfa_table_length * table_width>,
 			     array_container_t<uint16_t, dfa_table_length>>
 		  convert_nfa_to_dfa()
 	{
 		constexpr auto &nfa_table = nfa_table_package.first;
+		using nfa_table_type = remove_const_and_ref_t<decltype(nfa_table)>;
 		constexpr auto &nfa_ghost_rows = nfa_table_package.second;
+		using nfa_ghost_rows_type = remove_const_and_ref_t<decltype(nfa_ghost_rows)>;
 
-		using instanced_nfa_table_element_t = decltype(nfa_table)::type;
-		constexpr size_t nfa_table_1d_length = decltype(nfa_table)::length;
+		using instanced_nfa_table_element_t = typename nfa_table_type::type;
+		constexpr size_t nfa_table_1d_length = nfa_table_type::length;
 		constexpr size_t nfa_table_length = nfa_table_1d_length / table_width;
 
 		static_assert(nfa_table_length >= dfa_table_length, "moken bug detected: nfa_table_length is smaller than dfa_table_length in convert_nfa_to_dfa()");
@@ -1219,7 +1311,7 @@ namespace moken {
 		array_container_t<uint16_t, dfa_table_length> dfa_terminators { };
 		size_t dfa_table_head_row = 0;
 
-		constexpr auto create_new_dfa_row = [
+		const auto create_new_dfa_row = [
 						     &dfa_table,
 						     &dfa_table_head_row
 						    ]
@@ -1235,7 +1327,7 @@ namespace moken {
 			return dfa_table_head_row++;
 		};
 
-		constexpr auto set_dfa_next = [
+		const auto set_dfa_next = [
 					       &dfa_table,
 					       &dfa_table_head_row = std::as_const(dfa_table_head_row)
 					      ]
@@ -1255,11 +1347,11 @@ namespace moken {
 			if (target_row >= dfa_table_head_row) {
 				report_error("moken bug detected: out-of-bounds target_row passed to set_dfa_next()");
 			}
-			dfa_table[row * table_width + inner_index].next = target_row;
+			dfa_table[row * table_width + inner_index].next = (const dfa_table_element_t*)target_row;
 		};
 
-// TODO: constexpr doesn't work here, right?
-		constexpr auto superimpose_termination_handler_versions = [
+		// NOTE: constexpr doesn't work here because of the capture. Same for all the other lambdas in this function.
+		const auto superimpose_termination_handler_versions = [
 									   &nfa_table,
 									   &nfa_ghost_rows
 									  ]
@@ -1282,7 +1374,7 @@ namespace moken {
 			return result;
 		};
 
-		constexpr auto register_dfa_termination_handler = [
+		const auto register_dfa_termination_handler = [
 								   &dfa_terminators
 								  ]
 								  (
@@ -1297,12 +1389,15 @@ namespace moken {
 			dfa_terminators[dfa_row] = termination_handler;
 		};
 
-		constexpr auto follow_ghost_rows = [
+		const auto follow_ghost_rows = [
 						    &nfa_table,
 						    &nfa_ghost_rows
 						   ]
+						   <
+						    size_t capacity
+						   >
 						   (
-						    vector_t<size_t, possible_states_capacity> &possible_states
+						    vector_t<size_t, capacity> &possible_states
 						   )
 						   consteval
 		{
@@ -1330,10 +1425,10 @@ namespace moken {
 			//		For example, it's more practical that decltype((2 + 0.1f)) give you float instead of float&&.
 			//	--> Note that regular rvalues aren't handled like that. Those are returned as-is, which makes sense.
 
-			for (minimum_unsigned_integral_t<possible_states_capacity> i = 0;
-			     i < std::remove_reference_t<decltype(possible_states)>::length;
-			     i++)
-			{
+			if (capacity > possible_states_capacity) { return false; }
+			// TODO: Probs wanna not allow anything but possible_states_capacity instead of doing it this way.
+
+			for (minimum_unsigned_integral_t<capacity> i = 0; i < possible_states.length; i++) {
 				size_t state = possible_states[i];
 				if (nfa_ghost_rows[state] == true) {
 					if (nfa_table[state * table_width].next.length == 0) { continue; }
@@ -1348,8 +1443,9 @@ namespace moken {
 		};
 
 		// NOTE: If any of possible_states are ghost rows, this function will throw an error.
-		constexpr auto superimpose_element_next_vector_versions = [
-									   &nfa_table
+		const auto superimpose_element_next_vector_versions = [
+									   &nfa_table,
+									   &follow_ghost_rows
 									  ]
 									  (
 									   const vector_t<size_t, possible_states_capacity> &possible_states,
@@ -1363,18 +1459,19 @@ namespace moken {
 				if (nfa_ghost_rows[state] == true) {
 					report_error("moken bug detected: superimpose_element_next_vector_versions() called with ghost row/s in possible_states");
 				}
-				auto next_states = nfa_table[state * table_width + row_index].next;
+				// TODO: Check that this is what you want.
+				vector_t<size_t, possible_states_capacity> next_states = nfa_table[state * table_width + row_index].next;
 				if (follow_ghost_rows(next_states) == false) { return { false, result }; }
 				if (result.push_back(next_states) == false) {
-					result.remove_duplicates();
+					result.sort_and_remove_duplicates();
 					if (result.push_back(next_states) == false) { return { false, result }; }
 				}
 			}
-			result.remove_duplicates();	// TODO: implement this
+			result.sort_and_remove_duplicates();
 			return { true, result };
 		};
 
-		constexpr auto superimpose_element_versions = [
+		const auto superimpose_element_versions = [
 							       &nfa_table = std::as_const(nfa_table),
 							       &nfa_ghost_rows = std::as_const(nfa_ghost_rows)
 							      ]
@@ -1405,7 +1502,7 @@ namespace moken {
 			return true;
 		};
 
-		constexpr auto implementation = [&]
+		const auto implementation = [&]
 						(
 						 size_t dfa_row,
 						 vector_t<size_t, possible_states_capacity> &possible_states,
@@ -1495,7 +1592,7 @@ namespace moken {
 					self(finished_elements[0], possible_states, self);
 
 					size_t last_dfa_row = 0;
-					for (minimum_unsigned_t<table_width> i = 1; i < table_width; i++) {
+					for (minimum_unsigned_integral_t<table_width> i = 1; i < table_width; i++) {
 						if (finished_elements[i] == -1 || finished_elements[i] <= last_dfa_row) { continue; }
 						last_dfa_row = finished_elements[i];
 						if (superimpose_element_versions(possible_states_copy, possible_states, i) == false) {
@@ -1518,7 +1615,10 @@ namespace moken {
 		return { true, dfa_table, dfa_terminators };
 	}
 
-	template <auto nfa_table_package, uint32_t table_width, size_t dfa_table_length, size_t possible_states_capacity = 1>
+	template <const auto &nfa_table_package, uint32_t table_width, size_t dfa_table_length,
+		  size_t possible_states_capacity = decltype(nfa_table_package.first)::type::next_vector_capacity>
+	requires nfa_table_c<remove_const_and_ref_t<decltype(nfa_table_package)>, table_width>
+	&& (possible_states_capacity >= decltype(nfa_table_package.first)::type::next_vector_capacity)
 	consteval auto convert_nfa_to_dfa_function_runner() {
 		constexpr auto dfa_table_package = convert_nfa_to_dfa<nfa_table_package,
 		      						      table_width,
@@ -1570,10 +1670,27 @@ namespace moken {
 		constexpr size_t element_next_vector_capacity = std::get<2>(table_metrics);
 		constexpr size_t kleene_stack_capacity = std::get<3>(table_metrics);
 
-		constexpr auto nfa_table = generate_nfa_from_tokens<token_array,
+		static constexpr auto nfa_table = generate_nfa_from_tokens<token_array,
 			  					    nfa_max_rows,
 								    element_next_vector_capacity,
 								    kleene_stack_capacity>();
+
+		/*
+		NOTE: Passing nfa_table by value into the template parameters doesn't work because nfa_table.first is too large.
+		It SHOULD work, so I suppose this is a compiler bug!
+		In order to work around this, we've passed it by reference. Honestly, we should've probably been doing that anyway,
+		so it's not a big deal at all, but it is nontheless a bug as far as I can see.
+		TODO: Obviously report and post on forum and all that.
+
+		NOTE: We're lucky that static variables are allowed in consteval functions as of c++23, because or else we wouldn't be
+		able to pass the reference through the template parameter. We can't use c++23 as of clang-16, but we can use the working
+		draft, which is nice. We don't have to explicitly do that though because clang-16 is allowing the static variable to go through
+		with nothing but a warning saying it's from the working draft. I don't know if it's just this functionality that
+		it's letting slip through from the working draft, or if it's the entire working draft. In either case,
+		I guess we're gonna utilize the C++23 working draft in this project. Compatibility-wise it's not optimal,
+		but maybe we can find a more compatible way to do this at a later date.
+		TODO: think about that.
+		*/
 
 		constexpr auto dfa_table = convert_nfa_to_dfa_function_runner<nfa_table, table_width, dfa_max_rows>();
 
