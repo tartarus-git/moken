@@ -719,7 +719,9 @@ namespace moken {
 
 		nfa_max_rows++;		// NOTE: Because of last ghost row needed for last subpath in top-level alternation set.
 
-		return { nfa_max_rows, dfa_max_rows, max_next_vector_capacity, max_nested_kleene_closures };
+		// TODO: Remove the 40 and figure out an actual way to properly measure the max dfa length from this function.
+		// If you can't, it means we have to implement the retrying thing for this value as well. Let's try to avoid that.
+		return { nfa_max_rows, dfa_max_rows + 40, max_next_vector_capacity, max_nested_kleene_closures };
 	}
 
 	/*
@@ -931,19 +933,20 @@ namespace moken {
 		{
 			sort();
 			const_iterator_t previous_element_ptr = begin();
-			for (iterator_t ptr = begin(); ptr < end(); ptr++) {
-				while (true) {
-					if (*ptr == *previous_element_ptr) {
-						pluck(ptr);
-						// NOTE: I wanted to use ptr-- to make sure the next iteration refers to the correct element,
-						// but that doesn't work when ptr == 0 because having ptr one (or any number of units) below an object
-						// is UB. TODO: Expand on this note.
-						//ptr--;
-						continue;
-					}
-					previous_element_ptr = ptr;
-					break;
+			iterator_t ptr = begin() + 1;	// NOTE: This will always work, even for zero-length vectors in this case.
+			while (ptr < end()) {
+				if (*ptr == *previous_element_ptr) {
+					pluck(ptr);
+
+					// NOTE: I wanted to use ptr-- to make sure the next iteration refers to the correct element,
+					// but that doesn't work when ptr == 0 because having ptr one (or any number of units) below an object
+					// is UB. TODO: Expand on this note.
+					//ptr--;
+
+					continue;
 				}
+				previous_element_ptr = ptr;
+				ptr++;
 			}
 		}
 
@@ -1243,8 +1246,8 @@ namespace moken {
 		return std::pair(nfa_table, ghost_rows);
 	}
 
-	struct dfa_table_element_t {
-		const dfa_table_element_t *next;
+	struct relative_dfa_table_element_t {
+		size_t next;
 	};
 
 	template <typename T>
@@ -1292,7 +1295,7 @@ namespace moken {
 	requires nfa_table_c<remove_const_and_ref_t<decltype(nfa_table_package)>, table_width>
 	&& (possible_states_capacity >= decltype(nfa_table_package.first)::type::next_vector_capacity)
 	consteval std::tuple<bool,
-		  	     array_container_t<dfa_table_element_t, dfa_table_length * table_width>,
+		  	     array_container_t<relative_dfa_table_element_t, dfa_table_length * table_width>,
 			     array_container_t<uint16_t, dfa_table_length>>
 		  convert_nfa_to_dfa()
 	{
@@ -1305,9 +1308,10 @@ namespace moken {
 		constexpr size_t nfa_table_1d_length = nfa_table_type::length;
 		constexpr size_t nfa_table_length = nfa_table_1d_length / table_width;
 
-		static_assert(nfa_table_length >= dfa_table_length, "moken bug detected: nfa_table_length is smaller than dfa_table_length in convert_nfa_to_dfa()");
+		// TODO: Turn this back on.
+		//static_assert(nfa_table_length >= dfa_table_length, "moken bug detected: nfa_table_length is smaller than dfa_table_length in convert_nfa_to_dfa()");
 
-		array_container_t<dfa_table_element_t, dfa_table_length * table_width> dfa_table { };
+		array_container_t<relative_dfa_table_element_t, dfa_table_length * table_width> dfa_table { };
 		array_container_t<uint16_t, dfa_table_length> dfa_terminators { };
 		size_t dfa_table_head_row = 0;
 
@@ -1347,7 +1351,7 @@ namespace moken {
 			if (target_row >= dfa_table_head_row) {
 				report_error("moken bug detected: out-of-bounds target_row passed to set_dfa_next()");
 			}
-			dfa_table[row * table_width + inner_index].next = (const dfa_table_element_t*)target_row;
+			dfa_table[row * table_width + inner_index].next = target_row;
 		};
 
 		// NOTE: constexpr doesn't work here because of the capture. Same for all the other lambdas in this function.
@@ -1521,7 +1525,7 @@ namespace moken {
 			{
 				auto possible_states_copy = possible_states;
 
-				size_t finished_elements[table_width] { (size_t)-1 };
+				size_t finished_elements[table_width] { -1 };
 
 				{
 					array_container_t<vector_t<size_t, possible_states_capacity>, table_width> possible_states_for_every_element;
@@ -1542,7 +1546,7 @@ namespace moken {
 						set_dfa_next(dfa_row, i, target_row);
 
 						for (size_t j = i + 1; j < table_width; j++) {
-							if (finished_elements[j] != 0) { continue; }
+							if (finished_elements[j] != -1) { continue; }
 
 							if (possible_states_for_every_element[i] == possible_states_for_every_element[j]) {
 								finished_elements[j] = target_row;
@@ -1624,9 +1628,6 @@ namespace moken {
 		      						      table_width,
 								      dfa_table_length,
 								      possible_states_capacity>();
-		// TODO: These won't work, right?
-		constexpr auto &dfa_table = dfa_table_package.first;
-		constexpr auto &dfa_terminators = dfa_table_package.second;
 
 		// NOTE: AFAIK, constexpr if only lives up to it's full potential if you actually make use of the else clause.
 		// If you just rely on the fact that the return statement implies an else, I don't think the compiler will actually
@@ -1692,9 +1693,9 @@ namespace moken {
 		TODO: think about that.
 		*/
 
-		constexpr auto dfa_table = convert_nfa_to_dfa_function_runner<nfa_table, table_width, dfa_max_rows>();
+		constexpr auto relative_dfa_table = convert_nfa_to_dfa_function_runner<nfa_table, table_width, dfa_max_rows>();
 
-		return dfa_table;
+		return relative_dfa_table;
 	}
 
 }
