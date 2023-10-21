@@ -114,6 +114,50 @@ namespace moken {
 	template <typename source_t, typename target_t>
 	concept implicitly_convertible_to_x_type_c = requires(source_t source_instance) { [](target_t){}(source_instance); };
 
+	template <typename T>
+	concept sortable_element_c = requires(T first, T second) {
+		{ first < second } -> same_as_c<bool>;
+	};
+
+	template <typename T>
+	concept equatable_element_c = requires(T first, T second) {
+		{ first == second } -> same_as_c<bool>;
+	};
+
+	/*
+	template <typename = void>
+	struct does_uint8_t_exist { static constexpr bool value = false; };
+	template <>
+	struct does_uint8_t_exist<std::void_t<uint8_t>> { static constexpr bool value = true; };
+	template <typename = void>
+	struct does_uint16_t_exist { static constexpr bool value = false; };
+	template <>
+	struct does_uint16_t_exist<std::void_t<uint16_t>> { static constexpr bool value = true; };
+	template <typename = void>
+	struct does_uint32_t_exist { static constexpr bool value = false; };
+	template <>
+	struct does_uint32_t_exist<std::void_t<uint32_t>> { static constexpr bool value = true; };
+	template <typename = void>
+	struct does_uint64_t_exist { static constexpr bool value = false; };
+	template <>
+	struct does_uint64_t_exist<std::void_t<uint64_t>> { static constexpr bool value = true; };
+	*/
+
+	// TODO: Write a note about the trick with the if constexpr and the return value type because it's a pretty cool trick.
+	template <size_t highest_reachable_num>
+	consteval auto minimum_unsigned_integral_t_impl() {
+		if constexpr (highest_reachable_num <= (uint8_t)-1) { return (uint8_t)0; }
+		else if constexpr (highest_reachable_num <= (uint16_t)-1) { return (uint16_t)0; }
+		else if constexpr (highest_reachable_num <= (uint32_t)-1) { return (uint32_t)0; }
+		else if constexpr (highest_reachable_num <= (uint64_t)-1) { return (uint64_t)0; }
+		else {
+			static_assert(highest_reachable_num != highest_reachable_num, "moken bug detected: minimum_unsigned_integral_t_impl() somehow failed to find a usable type");
+		}
+	}
+
+	template <size_t highest_reachable_num>
+	using minimum_unsigned_integral_t = decltype(minimum_unsigned_integral_t_impl<highest_reachable_num>());
+
 	// NOTE: This deduction should technically be taken care of by an implicitly generated deduction guide,
 	// making my explicit version unnecessary. I don't know why that's not happening. All I know is my code doesn't compile
 	// without this.
@@ -140,11 +184,18 @@ namespace moken {
 	class array_container_t {
 	public:
 		using type = element_t;
-		static constexpr size_t length = array_length;
+		using storage_size_t = minimum_unsigned_integral_t<array_length>;
+		static constexpr storage_size_t length = array_length;
 
 		element_t data[length] { };	// TODO: Fix those { } instances in all the functions because those don't value initialize. Just default construct there.
 
 		consteval array_container_t() = default;
+
+		// NOTE: I wanted to use std::initializer_list to enable aggregate initialization for this class.
+		// But that's impossible unless the size of data is fixed. It seems std::initializer_list isn't
+		// as useful as I thought. They oughta make a better system.
+		// Here's a thought: What if aggregate initialization simply mapped to the below constructor?
+		// That would be fine right?
 
 		consteval array_container_t(const element_t (&source_array)[array_length]) {
 			for (size_t i = 0; i < length; i++) { data[i] = source_array[i]; }
@@ -218,6 +269,20 @@ namespace moken {
 		consteval array_container_t& operator=(const source_vector_container_t &source_vector) {
 			((const array_container_t*)this)->operator=(source_vector);
 			return *this;
+		}
+
+		consteval storage_size_t find_linear(const element_t &target, storage_size_t begin_index, storage_size_t end_index)
+		requires equatable_element_c<element_t>
+		{
+			for (storage_size_t i = begin_index; i < end_index; i++) {
+				if (target == (*this)[i]) { return i; }
+			}
+			return -1;
+		}
+		consteval storage_size_t find_linear(const element_t &target)
+		requires equatable_element_c<element_t>
+		{
+			return find_linear(target, 0, length);
 		}
 
 		// NOTE: The following functions are constexpr so that you can use them from runtime as well.
@@ -724,40 +789,6 @@ namespace moken {
 		return { nfa_max_rows, dfa_max_rows + 40, max_next_vector_capacity, max_nested_kleene_closures };
 	}
 
-	/*
-	template <typename = void>
-	struct does_uint8_t_exist { static constexpr bool value = false; };
-	template <>
-	struct does_uint8_t_exist<std::void_t<uint8_t>> { static constexpr bool value = true; };
-	template <typename = void>
-	struct does_uint16_t_exist { static constexpr bool value = false; };
-	template <>
-	struct does_uint16_t_exist<std::void_t<uint16_t>> { static constexpr bool value = true; };
-	template <typename = void>
-	struct does_uint32_t_exist { static constexpr bool value = false; };
-	template <>
-	struct does_uint32_t_exist<std::void_t<uint32_t>> { static constexpr bool value = true; };
-	template <typename = void>
-	struct does_uint64_t_exist { static constexpr bool value = false; };
-	template <>
-	struct does_uint64_t_exist<std::void_t<uint64_t>> { static constexpr bool value = true; };
-	*/
-
-	// TODO: Write a note about the trick with the if constexpr and the return value type because it's a pretty cool trick.
-	template <size_t highest_reachable_num>
-	consteval auto minimum_unsigned_integral_t_impl() {
-		if constexpr (highest_reachable_num <= (uint8_t)-1) { return (uint8_t)0; }
-		else if constexpr (highest_reachable_num <= (uint16_t)-1) { return (uint16_t)0; }
-		else if constexpr (highest_reachable_num <= (uint32_t)-1) { return (uint32_t)0; }
-		else if constexpr (highest_reachable_num <= (uint64_t)-1) { return (uint64_t)0; }
-		else {
-			static_assert(highest_reachable_num != highest_reachable_num, "moken bug detected: minimum_unsigned_integral_t_impl() somehow failed to find a usable type");
-		}
-	}
-
-	template <size_t highest_reachable_num>
-	using minimum_unsigned_integral_t = decltype(minimum_unsigned_integral_t_impl<highest_reachable_num>());
-
 	// NOTE: Technically, one would expect pushing onto a vector to start the lifetime of an object and
 	// popping off of a vector to end the lifetime of an object. Also, one would expect the constructors and destructors
 	// to run, respectively. Implementing those things at compile-time is possible, but since I don't have access to
@@ -774,16 +805,6 @@ namespace moken {
 	// and calling the destructor twice is undefined behavior).
 	// We can move from the internal array and turn right back around and copy a new value into the slot.
 	// Lifetime never ended, everythings good.
-
-	template <typename T>
-	concept sortable_element_c = requires(T first, T second) {
-		{ first < second } -> same_as_c<bool>;
-	};
-
-	template <typename T>
-	concept equatable_element_c = requires(T first, T second) {
-		{ first == second } -> same_as_c<bool>;
-	};
 
 	template <typename element_t, size_t capacity_param>
 	class vector_t : private array_container_t<element_t, capacity_param> {
@@ -929,18 +950,45 @@ namespace moken {
 		}
 
 		consteval void sort_and_remove_duplicates()
-		requires equatable_element_c<element_t>
+		requires sortable_element_c<element_t> && equatable_element_c<element_t>
 		{
 			sort();
 			const_iterator_t previous_element_ptr = begin();
-			iterator_t ptr = begin() + 1;	// NOTE: This will always work, even for zero-length vectors in this case.
+			iterator_t ptr = begin() + 1;	// NOTE: This will always work, even for zero-length vectors in this case (cuz capacity must be >0).
 			while (ptr < end()) {
 				if (*ptr == *previous_element_ptr) {
 					pluck(ptr);
 
 					// NOTE: I wanted to use ptr-- to make sure the next iteration refers to the correct element,
-					// but that doesn't work when ptr == 0 because having ptr one (or any number of units) below an object
-					// is UB. TODO: Expand on this note.
+					// but that doesn't work when ptr == begin() because having ptr one (or any number of units) below an object
+					// is UB. This is because the geometry of the memory space isn't defined by the standard and as such
+					// the following is true:
+					// --> pointer underflow and overflow is UB
+					// --> only within objects is the space guaranteed to be contiguous (and 1 element unit past the object
+					// if it's an array or something)
+					// --> since objects can be implicitly stored in various places with various rules (strange memory structure,
+					// or maybe some sort of address space paging thing like in those old consoles, etc...),
+					// any space outside of objects is the wild west.
+					// --> also the difference between pointers that are pointing to different objects is implementation defined
+					// (so still usable, but only if you're targeting a specific platform)
+					// -----> The problem in this case is the overflow underflow thing. You can't under any circumstances let a
+					// pointer underflow/overflow (some systems even have hardware interrupts for that which cause errors/exceptions
+					// and such). Since any object could be at the start of the address space (the geometry could also
+					// fold the address space so that the bottom is somewhere in the middle, also remember ASLR),
+					// going one below the object isn't something you should do.
+					// Obviously it's not an error and only UB because this is something you cannot enforce at runtime
+					// without overhead, which is why C++ opts for no overhead.
+					// Unless of course your runtime is at compile-time and overhead isn't the main concern, as is the case here.
+					// Then what is UB turns into a hard error and is determinized, as is the case here.
+					// The bottom line is we can't do this. We definitely shouldn't do this at runtime either!
+					// P.S: Casting some integer to a pointer is UB as well if that pointer doesn't refer to an object/element.
+					// And subtracting something and then adding the same thing back to a pointer isn't gonna give you what you
+					// started with in all cases. If the pointer doesn't refer to a valid object/element for the whole time,
+					// then it's UB and anything can happen. If you subtract two valid pointers in different objects,
+					// that number doesn't have to correspond to the actual distance between them, AFAIK,
+					// all it has to satisfy is this: If you add that number to the bottom pointer, you'll get the top pointer.
+					// As I said above, the actual value for the difference is implementation defined AFAIK.
+
 					//ptr--;
 
 					continue;
@@ -948,6 +996,12 @@ namespace moken {
 				previous_element_ptr = ptr;
 				ptr++;
 			}
+		}
+
+		consteval storage_size_t find_linear(const element_t &target)
+		requires equatable_element_c<element_t>
+		{
+			return array_container_t<element_t, capacity>::find_linear(target, 0, length);
 		}
 
 		consteval void clear() { length = 0; }
@@ -1308,19 +1362,20 @@ namespace moken {
 		constexpr size_t nfa_table_1d_length = nfa_table_type::length;
 		constexpr size_t nfa_table_length = nfa_table_1d_length / table_width;
 
-		// TODO: Turn this back on.
+		// TODO: Turn this back on. We turned it off for debugging, but it should be on.
 		//static_assert(nfa_table_length >= dfa_table_length, "moken bug detected: nfa_table_length is smaller than dfa_table_length in convert_nfa_to_dfa()");
 
 		array_container_t<relative_dfa_table_element_t, dfa_table_length * table_width> dfa_table { };
-		array_container_t<uint16_t, dfa_table_length> dfa_terminators { };
+		array_container_t<uint16_t, dfa_table_length> dfa_terminators({ (uint16_t)-1 });
+		vector_t<vector_t<size_t, possible_states_capacity>, dfa_table_length> dfa_table_index { };
 		size_t dfa_table_head_row = 0;
 
 		const auto create_new_dfa_row = [
-						     &dfa_table,
-						     &dfa_table_head_row
-						    ]
-						    ()
-						    consteval
+						 &dfa_table,
+						 &dfa_table_head_row
+						]
+						()
+						consteval
 		{
 			if (dfa_table_head_row == dfa_table_length) {
 				report_error("moken bug detected: dfa_table_head_row overflowed in create_new_dfa_row()");
@@ -1332,15 +1387,15 @@ namespace moken {
 		};
 
 		const auto set_dfa_next = [
-					       &dfa_table,
-					       &dfa_table_head_row = std::as_const(dfa_table_head_row)
-					      ]
-					      (
-					       size_t row,
-					       size_t inner_index,		// TODO: Probably use the min integer thing for this param
-					       size_t target_row
-					      )
-					      consteval
+					   &dfa_table,
+					   &dfa_table_head_row = std::as_const(dfa_table_head_row)
+					  ]
+					  (
+					   size_t row,
+					   minimum_unsigned_integral_t<table_width> inner_index,
+					   size_t target_row
+					  )
+					  consteval
 		{
 			if (row >= dfa_table_head_row) {
 				report_error("moken bug detected: out-of-bounds row passed to set_dfa_next()");
@@ -1354,24 +1409,27 @@ namespace moken {
 			dfa_table[row * table_width + inner_index].next = target_row;
 		};
 
-		// NOTE: constexpr doesn't work here because of the capture. Same for all the other lambdas in this function.
+		// NOTE: making constexpr variable doesn't work here because of the capture. Same for all the other lambdas in this function.
 		const auto superimpose_termination_handler_versions = [
-									   &nfa_table,
-									   &nfa_ghost_rows
-									  ]
-									  <
-									   size_t vector_capacity
-									  >
-									  (
-									   vector_t<size_t, vector_capacity> &possible_states
-									  )
-									  consteval
+								       &nfa_table,
+								       &nfa_ghost_rows
+								      ]
+								      <
+								       size_t vector_capacity
+								      >
+								      (
+								       vector_t<size_t, vector_capacity> &possible_states
+								      )
+								      consteval
 		{
 			vector_t<size_t, vector_capacity> new_possible_states;
 			uint32_t result = -1;
 			for (const size_t &state : possible_states) {
 				if (nfa_ghost_rows[state] == false) { new_possible_states.push_back(state); continue; }
-				if (nfa_table[state * table_width].next.length != 0) { new_possible_states.push_back(state); continue; }
+				if (nfa_table[state * table_width].next.length != 0) {
+					// new_possible_states.push_back(state); continue;
+				report_error("moken bug detected: possible_states cannot contain ghost rows in superimpose_termination_handler_versions");
+				}
 				result = nfa_table[state * table_width + 1].next[0];
 			}
 			possible_states = new_possible_states;
@@ -1379,13 +1437,13 @@ namespace moken {
 		};
 
 		const auto register_dfa_termination_handler = [
-								   &dfa_terminators
-								  ]
-								  (
-								   size_t dfa_row,
-								   uint16_t termination_handler
-								  )
-								  consteval
+							       &dfa_terminators
+							      ]
+							      (
+							       size_t dfa_row,
+							       uint16_t termination_handler
+							      )
+							      consteval
 		{
 			if (dfa_row >= dfa_table_length) {
 				report_error("moken bug detected: invalid dfa_row passed to register_dfa_termination_handler(), out-of-bounds");
@@ -1394,16 +1452,16 @@ namespace moken {
 		};
 
 		const auto follow_ghost_rows = [
-						    &nfa_table,
-						    &nfa_ghost_rows
-						   ]
-						   <
-						    size_t capacity
-						   >
-						   (
-						    vector_t<size_t, capacity> &possible_states
-						   )
-						   consteval
+						&nfa_table,
+						&nfa_ghost_rows
+					       ]
+					       <
+						size_t capacity
+					       >
+					       (
+						vector_t<size_t, capacity> &possible_states
+					       )
+					       consteval
 		{
 			// NOTE: For myself as future reference, feel free to ignore:
 			// decltype(possible_states) doesn't get you the type that the reference is referring to,
@@ -1429,9 +1487,6 @@ namespace moken {
 			//		For example, it's more practical that decltype((2 + 0.1f)) give you float instead of float&&.
 			//	--> Note that regular rvalues aren't handled like that. Those are returned as-is, which makes sense.
 
-			if (capacity > possible_states_capacity) { return false; }
-			// TODO: Probs wanna not allow anything but possible_states_capacity instead of doing it this way.
-
 			for (minimum_unsigned_integral_t<capacity> i = 0; i < possible_states.length; i++) {
 				size_t state = possible_states[i];
 				if (nfa_ghost_rows[state] == true) {
@@ -1448,22 +1503,22 @@ namespace moken {
 
 		// NOTE: If any of possible_states are ghost rows, this function will throw an error.
 		const auto superimpose_element_next_vector_versions = [
-									   &nfa_table,
-									   &follow_ghost_rows
-									  ]
-									  (
-									   const vector_t<size_t, possible_states_capacity> &possible_states,
-									   size_t row_index
-									  )
-									  consteval
-									  -> std::pair<size_t, vector_t<size_t, possible_states_capacity>>
+								       &nfa_table,
+								       &follow_ghost_rows
+								      ]
+								      (
+								       const vector_t<size_t, possible_states_capacity> &possible_states,
+								       size_t row_index
+								      )
+								      consteval
+								      -> std::pair<size_t, vector_t<size_t, possible_states_capacity>>
 		{
 			vector_t<size_t, possible_states_capacity> result;
 			for (size_t state : possible_states) {
 				if (nfa_ghost_rows[state] == true) {
-					report_error("moken bug detected: superimpose_element_next_vector_versions() called with ghost row/s in possible_states");
+				report_error("moken bug detected: superimpose_element_next_vector_versions() called with ghost row/s in possible_states");
 				}
-				// TODO: Check that this is what you want.
+				// NOTE: Using possible_states_capacity here instead of next_vector_capacity on purpose. We need the storage space.
 				vector_t<size_t, possible_states_capacity> next_states = nfa_table[state * table_width + row_index].next;
 				if (follow_ghost_rows(next_states) == false) { return { false, result }; }
 				if (result.push_back(next_states) == false) {
@@ -1476,19 +1531,19 @@ namespace moken {
 		};
 
 		const auto superimpose_element_versions = [
-							       &nfa_table = std::as_const(nfa_table),
-							       &nfa_ghost_rows = std::as_const(nfa_ghost_rows)
-							      ]
-							      <
-							       size_t vector_1_capacity,
-							       size_t vector_2_capacity
-							      >
-							      (
-							       const vector_t<size_t, vector_1_capacity> &possible_states,
-							       vector_t<size_t, vector_2_capacity> &target_buffer,
-							       minimum_unsigned_integral_t<table_width> element_in_row
-							      )
-							      consteval
+							   &nfa_table = std::as_const(nfa_table),
+							   &nfa_ghost_rows = std::as_const(nfa_ghost_rows)
+							  ]
+							  <
+							   size_t vector_1_capacity,
+							   size_t vector_2_capacity
+							  >
+							  (
+							   const vector_t<size_t, vector_1_capacity> &possible_states,
+							   vector_t<size_t, vector_2_capacity> &target_buffer,
+							   minimum_unsigned_integral_t<table_width> element_in_row
+							  )
+							  consteval
 		{
 			for (const size_t &state : possible_states) {
 				if (nfa_ghost_rows[state] == true) {
@@ -1507,13 +1562,13 @@ namespace moken {
 		};
 
 		const auto implementation = [&]
-						(
-						 size_t dfa_row,
-						 vector_t<size_t, possible_states_capacity> &possible_states,
-						 const auto &self
-						)
-						consteval
-						-> bool
+					    (
+					     size_t dfa_row,
+					     vector_t<size_t, possible_states_capacity> &possible_states,
+					     const auto &self
+					    )
+					    consteval
+					    -> bool
 		{
 			if (follow_ghost_rows(possible_states) == false) { return false; }
 			uint32_t termination_handler = superimpose_termination_handler_versions(possible_states);
@@ -1525,7 +1580,11 @@ namespace moken {
 			{
 				auto possible_states_copy = possible_states;
 
-				size_t finished_elements[table_width] { -1 };
+				// NOTE: signed -> unsigned conversions are considered narrowing even if it's
+				// from a smaller to a bigger type.
+				// I guess narrowing simply means that the value will change, since it can't be represented.
+				// And obviously narrowing conversions aren't allowed in aggregate initializations.
+				size_t finished_elements[table_width] { (size_t)-1 };
 
 				{
 					array_container_t<vector_t<size_t, possible_states_capacity>, table_width> possible_states_for_every_element;
@@ -1537,6 +1596,9 @@ namespace moken {
 					}
 
 					for (size_t i = 0; i < table_width; i++) {
+						// TODO: Think about position and efficiency.
+						if (dfa_table_index.find_linear(possible_states_for_every_element[i]) != -1) { continue; }
+
 						if (finished_elements[i] != -1) { continue; }
 
 						size_t target_row = create_new_dfa_row();
@@ -1544,6 +1606,8 @@ namespace moken {
 						finished_elements[i] = target_row;
 
 						set_dfa_next(dfa_row, i, target_row);
+
+						dfa_table_index.push_back(possible_states_for_every_element[i]);
 
 						for (size_t j = i + 1; j < table_width; j++) {
 							if (finished_elements[j] != -1) { continue; }
@@ -1557,6 +1621,8 @@ namespace moken {
 
 					possible_states = possible_states_for_every_element[0];
 				}
+
+				if (finished_elements[0] == -1) { return true; }
 
 				bool one_child_recurse = true;
 				for (minimum_unsigned_integral_t<table_width> i = 1; i < table_width; i++) {
