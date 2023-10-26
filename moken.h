@@ -271,6 +271,8 @@ namespace moken {
 			return *this;
 		}
 
+		// TODO: replace with find that does different stuff based on if this vector is instantiated with the sorted = true
+		// template argument.
 		consteval storage_size_t find_linear(const element_t &target, storage_size_t begin_index, storage_size_t end_index)
 		requires equatable_element_c<element_t>
 		{
@@ -784,9 +786,7 @@ namespace moken {
 
 		nfa_max_rows++;		// NOTE: Because of last ghost row needed for last subpath in top-level alternation set.
 
-		// TODO: Remove the 40 and figure out an actual way to properly measure the max dfa length from this function.
-		// If you can't, it means we have to implement the retrying thing for this value as well. Let's try to avoid that.
-		return { nfa_max_rows, dfa_max_rows + 40, max_next_vector_capacity, max_nested_kleene_closures };
+		return { nfa_max_rows, dfa_max_rows, max_next_vector_capacity, max_nested_kleene_closures };
 	}
 
 	// NOTE: Technically, one would expect pushing onto a vector to start the lifetime of an object and
@@ -1595,11 +1595,27 @@ namespace moken {
 						}
 					}
 
+					size_t first_new_target_element = -1;
 					for (size_t i = 0; i < table_width; i++) {
-						// TODO: Think about position and efficiency.
-						if (dfa_table_index.find_linear(possible_states_for_every_element[i]) != -1) { continue; }
-
 						if (finished_elements[i] != -1) { continue; }
+
+						size_t twin_target_row = dfa_table_index.find(possible_states_for_every_element[i]);
+						if (twin_row != -1) {
+							finished_elements[i] = -2;
+							set_dfa_next(dfa_row, i, twin_target_row);
+
+							for (size_t j = i + 1; j < table_width; j++) {
+								if (finished_elements[j] != -1) { continue; }
+
+								const auto &a_states = possible_states_for_every_element[i];
+								const auto &b_states = possible_states_for_every_element[j];
+								if (a_states == b_states) {
+									finished_elements[j] = -2;
+									set_dfa_next(dfa_row, j, twin_target_row);
+								}
+							}
+							continue;
+						}
 
 						size_t target_row = create_new_dfa_row();
 
@@ -1607,31 +1623,39 @@ namespace moken {
 
 						set_dfa_next(dfa_row, i, target_row);
 
+						if (first_new_target_element == -1) { first_new_target_element = i; }
+
 						dfa_table_index.push_back(possible_states_for_every_element[i]);
 
 						for (size_t j = i + 1; j < table_width; j++) {
 							if (finished_elements[j] != -1) { continue; }
 
-							if (possible_states_for_every_element[i] == possible_states_for_every_element[j]) {
+							const auto &a_states = possible_states_for_every_element[i];
+							const auto &b_states = possible_states_for_every_element[j];
+							if (a_states == b_states) {
 								finished_elements[j] = target_row;
 								set_dfa_next(dfa_row, j, target_row);
 							}
 						}
 					}
 
-					possible_states = possible_states_for_every_element[0];
+					possible_states = possible_states_for_every_element[first_new_target_element];
 				}
 
-				if (finished_elements[0] == -1) { return true; }
+				// NOTE: If there are no elements with new target, then there are no new rows
+				// for us to make. We're done (only this recursion is done), return success.
+				if (first_new_target_element == -1) { return true; }
 
 				bool one_child_recurse = true;
-				for (minimum_unsigned_integral_t<table_width> i = 1; i < table_width; i++) {
-					if (finished_elements[i] != -1 && finished_elements[i] != finished_elements[0]) {
-						one_child_recurse = false;
-						break;
+				for (minimum_unsigned_integral_t<table_width> i = first_new_target_element + 1; i < table_width; i++) {
+					if (finished_elements[i] < -2) {
+						if (finished_elements[i] != finished_elements[first_new_target_element]) {
+							one_child_recurse = false;
+							break;
+						}
 					}
 				}
-				// NOTE: This jump is necessary because you can't conditionally end a scope in C++.
+				// NOTE: This one_child_recurse flag is necessary because you can't conditionally end a scope in C++.
 				// In almost all situations, not being able to is fine since the only thing you would do after
 				// ending the scope is either jumping out to other code that doesn't rely on the scope or returning out
 				// of the function. In both situations, the scope is ended by the compiler anyway, so ending it by hand
@@ -1648,28 +1672,33 @@ namespace moken {
 				// Although it would be stupid, the compiler could recurse with a big stack in this situation.
 				// I would never expect it to happen at runtime, but I don't want to take the risk of a barely-optimizing
 				// compile-time interpreter messing things up at compile-time, as could be the case here.
-				// So I've jumped out of the scope before recursing, to ensure that the stack is at least smaller,
+				// So I've gotten out of the scope before recursing, to ensure that the stack is at least smaller,
 				// even if I can't ensure that it completely goes away before the call.
-				// This incurs a jump, which wouldn't be necessary if I could conditionally end the scope, so it's not the ideal solution,
-				// but I've got no better options AFAIK.
+				// This incurs a jump, which wouldn't be necessary if I could conditionally end the scope,
+				// so it's not the ideal solution, but I've got no better options AFAIK.
 
-				// TODO: Yeah I now know that you can't goto in consteval functions, which is stupid.
-				// Work around it with a flag and some ifs.
+				// NOTE: You'll notice that there isn't a jump, that's simply because goto isn't allowed in consteval functions.
+				// That's fucking stupid, I don't like that. But I have no choice but to work around it with a flag.
+				// So that's what I've done. No jump, instead a flag.
 
-				one_child_target_dfa_row = finished_elements[0];	// NOTE: Used not only for one child recurse.
+				// NOTE: Used not only for one child recurse.
+				one_child_target_dfa_row = finished_elements[first_new_target_element];
 
 				if (!one_child_recurse) {
-					self(finished_elements[0], possible_states, self);
+					self(one_child_target_dfa_row, possible_states, self);
 
 					size_t last_dfa_row = 0;
-					for (minimum_unsigned_integral_t<table_width> i = 1; i < table_width; i++) {
-						if (finished_elements[i] == -1 || finished_elements[i] <= last_dfa_row) { continue; }
+					for (minimum_unsigned_integral_t<table_width> i = first_new_target_element + 1; i < table_width; i++) {
+						if (finished_elements[i] >= -2 || finished_elements[i] <= last_dfa_row) { continue; }
 						last_dfa_row = finished_elements[i];
+						possible_states.clear();
 						if (superimpose_element_versions(possible_states_copy, possible_states, i) == false) {
 							return false;
 						}
 						self(finished_elements[i], possible_states, self);
 					}
+
+					return true;
 				}
 			}
 
