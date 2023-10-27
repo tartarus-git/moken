@@ -158,6 +158,24 @@ namespace moken {
 	template <size_t highest_reachable_num>
 	using minimum_unsigned_integral_t = decltype(minimum_unsigned_integral_t_impl<highest_reachable_num>());
 
+	template <typename source_integral_t>
+	struct next_larger_integral_t_impl { };
+	template <>
+	struct next_larger_integral_t_impl<int8_t> { using type = int16_t; };
+	template <>
+	struct next_larger_integral_t_impl<int16_t> { using type = int32_t; };
+	template <>
+	struct next_larger_integral_t_impl<int32_t> { using type = int64_t; };
+	template <>
+	struct next_larger_integral_t_impl<uint8_t> { using type = uint16_t; };
+	template <>
+	struct next_larger_integral_t_impl<uint16_t> { using type = uint32_t; };
+	template <>
+	struct next_larger_integral_t_impl<uint32_t> { using type = uint64_t; };
+
+	template <typename T>
+	using next_larger_integral_t = typename next_larger_integral_t_impl<T>::type;
+
 	// NOTE: This deduction should technically be taken care of by an implicitly generated deduction guide,
 	// making my explicit version unnecessary. I don't know why that's not happening. All I know is my code doesn't compile
 	// without this.
@@ -186,6 +204,7 @@ namespace moken {
 		using type = element_t;
 		using storage_size_t = minimum_unsigned_integral_t<array_length>;
 		static constexpr storage_size_t length = array_length;
+		using loose_storage_size_t = next_larger_integral_t<storage_size_t>;
 
 		element_t data[length] { };	// TODO: Fix those { } instances in all the functions because those don't value initialize. Just default construct there.
 
@@ -271,21 +290,22 @@ namespace moken {
 			return *this;
 		}
 
-		// TODO: replace with find that does different stuff based on if this vector is instantiated with the sorted = true
-		// template argument.
-		consteval storage_size_t find_linear(const element_t &target, storage_size_t begin_index, storage_size_t end_index)
+		// NOTE: If you need sorted vector, add template parameter that changes the member function behavior for finding and
+		// inserting. Then you can create sorted and unsorted vectors on instantiation. Best way as far as I can see for this situation.
+		consteval loose_storage_size_t find(const element_t &target, storage_size_t begin_index, storage_size_t end_index)
 		requires equatable_element_c<element_t>
 		{
+		if (end_index >= length) { report_error("moken bug detected: array_container_t::find called with end_index >= length"); }
+		if (end_index < begin_index) { report_error("moken bug detected: array_container_t::find called with end_index < begin_index"); }
+		if (begin_index >= length) { report_error("moken bug detected: array_container_t::find called with begin_index >= length"); }
 			for (storage_size_t i = begin_index; i < end_index; i++) {
 				if (target == (*this)[i]) { return i; }
 			}
 			return -1;
 		}
-		consteval storage_size_t find_linear(const element_t &target)
+		consteval loose_storage_size_t find(const element_t &target)
 		requires equatable_element_c<element_t>
-		{
-			return find_linear(target, 0, length);
-		}
+		{ return find(target, 0, length); }
 
 		// NOTE: The following functions are constexpr so that you can use them from runtime as well.
 		// Useful for the table jumper algorithm that uses the table at runtime and also for debugging.
@@ -824,8 +844,10 @@ namespace moken {
 		// NOTE: Depending on what these types end up as, the memory layout here could be suboptimal,
 		// but there's no way to fix that in current C++ as far as I'm aware.
 		// In this case, it's not a big deal at all.
-		using storage_size_t = minimum_unsigned_integral_t<capacity>;
+		using typename array_container_t<element_t, capacity>::storage_size_t;
 		storage_size_t length = 0;
+
+		using typename array_container_t<element_t, capacity>::loose_storage_size_t;
 
 		consteval vector_t() = default;
 
@@ -998,10 +1020,19 @@ namespace moken {
 			}
 		}
 
-		consteval storage_size_t find_linear(const element_t &target)
+		// NOTE: Same note about expanding as the one in array_container_t.
+		consteval loose_storage_size_t find(const element_t &target, size_t begin_index, size_t end_index)
 		requires equatable_element_c<element_t>
 		{
-			return array_container_t<element_t, capacity>::find_linear(target, 0, length);
+			if (end_index >= length) { report_error("moken bug detected: vector_t::find called with end_index >= length"); }
+			if (end_index < begin_index) { report_error("moken bug detected: vector_t::find called with end_index < begin_index"); }
+			if (begin_index >= length) { report_error("moken bug detected: vector_t::find called with begin_index >= length"); }
+			return array_container_t<element_t, capacity>::find(target, begin_index, end_index);
+		}
+		consteval loose_storage_size_t find(const element_t &target)
+		requires equatable_element_c<element_t>
+		{
+			return array_container_t<element_t, capacity>::find(target, 0, length);
 		}
 
 		consteval void clear() { length = 0; }
@@ -1585,6 +1616,7 @@ namespace moken {
 				// I guess narrowing simply means that the value will change, since it can't be represented.
 				// And obviously narrowing conversions aren't allowed in aggregate initializations.
 				size_t finished_elements[table_width] { (size_t)-1 };
+				size_t first_new_target_element = -1;
 
 				{
 					array_container_t<vector_t<size_t, possible_states_capacity>, table_width> possible_states_for_every_element;
@@ -1595,12 +1627,12 @@ namespace moken {
 						}
 					}
 
-					size_t first_new_target_element = -1;
 					for (size_t i = 0; i < table_width; i++) {
 						if (finished_elements[i] != -1) { continue; }
 
-						size_t twin_target_row = dfa_table_index.find(possible_states_for_every_element[i]);
-						if (twin_row != -1) {
+						typename decltype(dfa_table_index)::loose_storage_size_t twin_target_row
+							= dfa_table_index.find(possible_states_for_every_element[i]);
+						if (twin_target_row != (decltype(twin_target_row))-1) {
 							finished_elements[i] = -2;
 							set_dfa_next(dfa_row, i, twin_target_row);
 
@@ -1639,12 +1671,12 @@ namespace moken {
 						}
 					}
 
+					// NOTE: If there are no elements with new target, then there are no new rows
+					// for us to make. We're done (only this recursion is done), return success.
+					if (first_new_target_element == -1) { return true; }
+
 					possible_states = possible_states_for_every_element[first_new_target_element];
 				}
-
-				// NOTE: If there are no elements with new target, then there are no new rows
-				// for us to make. We're done (only this recursion is done), return success.
-				if (first_new_target_element == -1) { return true; }
 
 				bool one_child_recurse = true;
 				for (minimum_unsigned_integral_t<table_width> i = first_new_target_element + 1; i < table_width; i++) {
