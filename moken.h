@@ -210,6 +210,10 @@ namespace moken {
 
 		consteval array_container_t() = default;
 
+		consteval array_container_t(const element_t &default_element_value) {
+			for (element_t &element : data) { element = default_element_value; }
+		}
+
 		// NOTE: I wanted to use std::initializer_list to enable aggregate initialization for this class.
 		// But that's impossible unless the size of data is fixed. It seems std::initializer_list isn't
 		// as useful as I thought. They oughta make a better system.
@@ -806,7 +810,7 @@ namespace moken {
 
 		nfa_max_rows++;		// NOTE: Because of last ghost row needed for last subpath in top-level alternation set.
 
-		return { nfa_max_rows, dfa_max_rows, max_next_vector_capacity, max_nested_kleene_closures };
+		return { nfa_max_rows, dfa_max_rows + 50, max_next_vector_capacity, max_nested_kleene_closures };
 	}
 
 	// NOTE: Technically, one would expect pushing onto a vector to start the lifetime of an object and
@@ -850,6 +854,11 @@ namespace moken {
 		using typename array_container_t<element_t, capacity>::loose_storage_size_t;
 
 		consteval vector_t() = default;
+
+		consteval vector_t(const element_t (&source_array)[capacity_param]) {
+			length = capacity;
+			for (size_t i = 0; i < length; i++) { data[i] = source_array[i]; }
+		}
 
 		consteval vector_t(const vector_t<element_t, capacity_param> &other)
 		: array_container_t<element_t, capacity>(other), length(other.length)
@@ -1035,6 +1044,8 @@ namespace moken {
 			return array_container_t<element_t, capacity>::find(target, 0, length);
 		}
 
+		consteval bool is_empty() { return length == 0; }
+
 		consteval void clear() { length = 0; }
 	};
 
@@ -1108,9 +1119,9 @@ namespace moken {
 
 		using instanced_nfa_table_element_t = nfa_table_element_t<element_next_vector_capacity>;
 		constexpr size_t nfa_table_1d_length = table_length * table_width;
-		array_container_t<instanced_nfa_table_element_t, nfa_table_1d_length> nfa_table { };
+		array_container_t<instanced_nfa_table_element_t, nfa_table_1d_length> nfa_table;
 
-		array_container_t<bool, table_length> ghost_rows { };
+		array_container_t<bool, table_length> ghost_rows;
 
 		size_t table_head = 0;
 
@@ -1393,16 +1404,17 @@ namespace moken {
 		constexpr size_t nfa_table_1d_length = nfa_table_type::length;
 		constexpr size_t nfa_table_length = nfa_table_1d_length / table_width;
 
-		// TODO: Turn this back on. We turned it off for debugging, but it should be on.
+		// TODO: Enable again.
 		//static_assert(nfa_table_length >= dfa_table_length, "moken bug detected: nfa_table_length is smaller than dfa_table_length in convert_nfa_to_dfa()");
 
-		array_container_t<relative_dfa_table_element_t, dfa_table_length * table_width> dfa_table { };
-		array_container_t<uint16_t, dfa_table_length> dfa_terminators({ (uint16_t)-1 });
-		vector_t<vector_t<size_t, possible_states_capacity>, dfa_table_length> dfa_table_index { };
+		array_container_t<relative_dfa_table_element_t, dfa_table_length * table_width> dfa_table({ (size_t)-1 });
+		array_container_t<uint16_t, dfa_table_length> dfa_terminators(-1);
+		vector_t<vector_t<size_t, possible_states_capacity>, dfa_table_length> dfa_table_index;
 		size_t dfa_table_head_row = 0;
 
 		const auto create_new_dfa_row = [
 						 &dfa_table,
+						 &dfa_table_index,
 						 &dfa_table_head_row
 						]
 						()
@@ -1414,6 +1426,7 @@ namespace moken {
 			if (dfa_table_head_row > dfa_table_length) {
 				report_error("moken bug detected: dfa_table_head_row somehow got more than 1 unit past end of dfa_table");
 			}
+			dfa_table_index.push_back({});
 			return dfa_table_head_row++;
 		};
 
@@ -1454,12 +1467,11 @@ namespace moken {
 								      consteval
 		{
 			vector_t<size_t, vector_capacity> new_possible_states;
-			uint32_t result = -1;
+			uint16_t result = -1;
 			for (const size_t &state : possible_states) {
 				if (nfa_ghost_rows[state] == false) { new_possible_states.push_back(state); continue; }
 				if (nfa_table[state * table_width].next.length != 0) {
-					// new_possible_states.push_back(state); continue;
-				report_error("moken bug detected: possible_states cannot contain ghost rows in superimpose_termination_handler_versions");
+		report_error("moken bug detected: possible_states cannot contain ghost rows in superimpose_termination_handler_versions");
 				}
 				result = nfa_table[state * table_width + 1].next[0];
 			}
@@ -1477,7 +1489,7 @@ namespace moken {
 							      consteval
 		{
 			if (dfa_row >= dfa_table_length) {
-				report_error("moken bug detected: invalid dfa_row passed to register_dfa_termination_handler(), out-of-bounds");
+			report_error("moken bug detected: invalid dfa_row passed to register_dfa_termination_handler(), out-of-bounds");
 			}
 			dfa_terminators[dfa_row] = termination_handler;
 		};
@@ -1601,11 +1613,21 @@ namespace moken {
 					    consteval
 					    -> bool
 		{
+			/*
+			   // TODO: If we're gonna make this system super optimized by even using all the DFA stuff in the first place,
+			   we might as well go all the way. That means you oughta consider if the way we plan to handle non-matches is
+			   the most efficient. Maybe we should have an error state that is jumped to and then the handler for that
+			   state will handle errors. More efficient and more customizable by the user, think about it.
+			   // TODO: Also think about and research that grep algorithm that you read about online once.
+			   Because once we realize the text is not a match up to a certain point, we have to be able to calculate how
+			   much of the text we can skip before starting a new match. That's some sort of function of the structure of
+			   the DFA, and calculating that is an interesting problem. But we oughta do that in order to speed things up
+			   by quite a great deal potentially.
+			*/
+
 			if (follow_ghost_rows(possible_states) == false) { return false; }
-			uint32_t termination_handler = superimpose_termination_handler_versions(possible_states);
-			// NOTE: BTW, AFAIK, the implicit conversion goes signed -> expand -> unsigned.
-			// If it didn't, the comparison would yield a different result.
-			if (termination_handler != -1) { register_dfa_termination_handler(dfa_row, termination_handler); }
+			uint16_t termination_handler = superimpose_termination_handler_versions(possible_states);
+			if (termination_handler != (uint16_t)-1) { register_dfa_termination_handler(dfa_row, termination_handler); }
 
 			size_t one_child_target_dfa_row;
 			{
@@ -1615,7 +1637,8 @@ namespace moken {
 				// from a smaller to a bigger type.
 				// I guess narrowing simply means that the value will change, since it can't be represented.
 				// And obviously narrowing conversions aren't allowed in aggregate initializations.
-				size_t finished_elements[table_width] { (size_t)-1 };
+				size_t finished_elements[table_width];
+				for (size_t &element : finished_elements) { element = -1; }
 				size_t first_new_target_element = -1;
 
 				{
@@ -1628,7 +1651,9 @@ namespace moken {
 					}
 
 					for (size_t i = 0; i < table_width; i++) {
-						if (finished_elements[i] != -1) { continue; }
+						if (possible_states_for_every_element[i].is_empty()
+						    || finished_elements[i] != -1)
+						{ continue; }
 
 						typename decltype(dfa_table_index)::loose_storage_size_t twin_target_row
 							= dfa_table_index.find(possible_states_for_every_element[i]);
@@ -1657,7 +1682,7 @@ namespace moken {
 
 						if (first_new_target_element == -1) { first_new_target_element = i; }
 
-						dfa_table_index.push_back(possible_states_for_every_element[i]);
+						dfa_table_index[target_row].push_back(possible_states_for_every_element[i]);
 
 						for (size_t j = i + 1; j < table_width; j++) {
 							if (finished_elements[j] != -1) { continue; }
@@ -1747,7 +1772,7 @@ namespace moken {
 	}
 
 	template <const auto &nfa_table_package, uint32_t table_width, size_t dfa_table_length,
-		  size_t possible_states_capacity = decltype(nfa_table_package.first)::type::next_vector_capacity>
+		  size_t possible_states_capacity = 16/*decltype(nfa_table_package.first)::type::next_vector_capacity*/>
 	requires nfa_table_c<remove_const_and_ref_t<decltype(nfa_table_package)>, table_width>
 	&& (possible_states_capacity >= decltype(nfa_table_package.first)::type::next_vector_capacity)
 	consteval auto convert_nfa_to_dfa_function_runner() {
@@ -1761,6 +1786,7 @@ namespace moken {
 		// template instantiate the way you would expect it to. It's not an optimization-based thing because it's supposed to
 		// be consistent, AFAIK. So it'll only choose between two paths if you actually use an else. Remember that.
 		if constexpr (std::get<0>(dfa_table_package) == false) {
+			report_error("RETRY REQUESTED!");
 			return convert_nfa_to_dfa_function_runner<nfa_table_package,
 			       					  table_width,
 								  dfa_table_length,

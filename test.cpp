@@ -3,6 +3,14 @@
 
 int main() {
 	constexpr auto dfa_table = moken::make_tokenizer_t<moken::array_container_t("(hi|((bye)))*end")>();
+	for (size_t i = 0; i < decltype(dfa_table.first)::length; i += decltype(dfa_table.first)::length / decltype(dfa_table.second)::length) {
+		//std::cout << dfa_table.second[i / (decltype(dfa_table.first)::length / decltype(dfa_table.second)::length)] << '\n';
+		for (size_t j = i; j < i + decltype(dfa_table.first)::length / decltype(dfa_table.second)::length; j++) {
+			std::cout << " " << dfa_table.first[j].next << " ";
+		}
+		std::cout << '\n';
+	}
+
 	/*for (auto token : token_array) {
 		switch (token.type) {
 		case moken::token_type_t::ALTERNATION: std::cout << "alternation\n"; break;
