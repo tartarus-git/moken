@@ -6,8 +6,8 @@
 #include <tuple>
 #include <concepts>
 #include <type_traits>
-// TODO: Check to make sure we need all these headers
 #include <algorithm>
+#include <functional>
 
 namespace moken {
 
@@ -17,12 +17,6 @@ namespace moken {
 	class are_types_same {
 	public:
 		static constexpr bool value = false;
-		// NOTE: We don't actually ever use this bool conversion functionality AFAIK,
-		// but it's in here for completeness. I see the value in keeping the code short and cutting out fluff,
-		// because it's all in a header, but I chose to opt for completeness because I find it more elegant
-		// and the extra space usage doesn't seem like it'll be a problem in this case.
-		// TO READERS: Hello, thx for taking a look at my code, if you feel we should strip some of
-		// the unnecessary stuff out of here, post an issue, we'll talk.
 		consteval operator bool() { return value; }
 	};
 	template <typename T>
@@ -41,11 +35,8 @@ namespace moken {
 	template <typename T>
 	using remove_const_and_ref_t = std::remove_const_t<std::remove_reference_t<T>>;
 
-	template <auto value>
-	inline constexpr bool is_at_least_one_v = (value >= 1);
-
 	template <typename element_t, size_t array_length>
-	requires is_at_least_one_v<array_length>
+	requires (array_length >= 1)
 	class array_container_t;
 
 	template <typename T>
@@ -124,6 +115,12 @@ namespace moken {
 		{ first == second } -> same_as_c<bool>;
 	};
 
+	// NOTE: AFAIK, sadly there is no way to do this in current C++. Because as soon as the type identifier (uint32_t for example)
+	// isn't defined, it'll cause a compilation error. This'll happen before templates are even instantiated or specializations are selected
+	// or anything like that happens. Before all that, (I guess) in the first round of semantic analysis after the un-template-instantiated AST
+	// is created, the compiler will complain. As such, we have no way of detecting that the type doesn't exist.
+	// In other words, we can't reach that meta of a level. The language isn't powerful enough. It would be cool if we could.
+	// But I think you'd really run the risk of seriously over-complicating C++ if you tried to implement that feature.
 	/*
 	template <typename = void>
 	struct does_uint8_t_exist { static constexpr bool value = false; };
@@ -143,13 +140,14 @@ namespace moken {
 	struct does_uint64_t_exist<std::void_t<uint64_t>> { static constexpr bool value = true; };
 	*/
 
-	// TODO: Write a note about the trick with the if constexpr and the return value type because it's a pretty cool trick.
-	template <size_t highest_reachable_num>
+	// NOTE: This pattern here, where you do if constexpr and then return something in the target type. It's pretty useful.
+	// More concise than the corresponding struct SFINAE version.
+	template <unsigned long long highest_reachable_num>
 	consteval auto minimum_unsigned_integral_t_impl() {
-		if constexpr (highest_reachable_num <= (uint8_t)-1) { return (uint8_t)0; }
-		else if constexpr (highest_reachable_num <= (uint16_t)-1) { return (uint16_t)0; }
-		else if constexpr (highest_reachable_num <= (uint32_t)-1) { return (uint32_t)0; }
-		else if constexpr (highest_reachable_num <= (uint64_t)-1) { return (uint64_t)0; }
+		if constexpr (/*does_uint8_t_exist<>::value && */highest_reachable_num <= (uint8_t)-1) { return (uint8_t)0; }
+		else if constexpr (/*does_uint16_t_exist<>::value && */highest_reachable_num <= (uint16_t)-1) { return (uint16_t)0; }
+		else if constexpr (/*does_uint32_t_exist<>::value && */highest_reachable_num <= (uint32_t)-1) { return (uint32_t)0; }
+		else if constexpr (/*does_uint64_t_exist<>::value && */highest_reachable_num <= (uint64_t)-1) { return (uint64_t)0; }
 		else {
 			static_assert(highest_reachable_num != highest_reachable_num, "moken bug detected: minimum_unsigned_integral_t_impl() somehow failed to find a usable type");
 		}
@@ -197,16 +195,24 @@ namespace moken {
 	array_container_t(const source_vector_container_t &source_vector_container)
 	-> array_container_t<std::remove_reference_t<decltype(*(source_vector_container.begin()))>, source_vector_container_t::capacity>;
 
+	// NOTE: The default constructor of array_container_t creates an array of initialized element_t's.
+	// It value-initializes those element_t's, which obviously means they get set to 0, unless they have a default constructor,
+	// in which case that is called.
+
 	template <typename element_t, size_t array_length>
-	requires is_at_least_one_v<array_length>
+	requires (array_length >= 1)
 	class array_container_t {
 	public:
 		using type = element_t;
 		using storage_size_t = minimum_unsigned_integral_t<array_length>;
 		static constexpr storage_size_t length = array_length;
+		// NOTE: Following is used when functions return either an index or error (-1)
 		using loose_storage_size_t = next_larger_integral_t<storage_size_t>;
 
-		element_t data[length] { };	// TODO: Fix those { } instances in all the functions because those don't value initialize. Just default construct there.
+		using iterator_t = element_t*;
+		using const_iterator_t = const element_t*;
+
+		element_t data[length] { };
 
 		consteval array_container_t() = default;
 
@@ -240,13 +246,17 @@ namespace moken {
 			for (const element_t &element : source_vector_container) { data[i++] = element; }
 		}
 
-		consteval const array_container_t& operator=(const element_t (&source_array)[length]) const {
+		consteval array_container_t& operator=(const element_t (&source_array)[length]) {
 			for (size_t i = 0; i < length; i++) { data[i] = source_array[i]; }
 			return *this;
 		}
 
-		consteval array_container_t& operator=(const element_t (&source_array)[length]) {
-			((const array_container_t*)this)->operator=(source_array);
+		template <convertible_to_compile_time_array_c source_container_t>
+		requires implicitly_convertible_to_x_type_c<container_element_t<source_container_t>, element_t> &&
+		(source_container_t::length == length)
+		consteval array_container_t& operator=(const source_container_t &source) {
+			element_t *ptr = data;
+			for (const container_element_t<source_container_t> &source_element : source) { *(ptr++) = source_element; }
 			return *this;
 		}
 
@@ -258,50 +268,55 @@ namespace moken {
 			for (const container_element_t<source_container_t> &source_element : source_container) { *(ptr++) = source_element; }
 		}
 
-		template <convertible_to_compile_time_array_c source_container_t>
-		requires implicitly_convertible_to_x_type_c<container_element_t<source_container_t>, element_t> &&
-		(source_container_t::length == length)
-		consteval const array_container_t& operator=(const source_container_t &source) const {
-			element_t *ptr = data;
-			// TODO: Get these functions to show themselves as compilation errors, and then remove them
-			// const operator= is stupid.
-			for (const container_element_t<source_container_t> &source_element : source) { *(ptr++) = source_element; }
-			return *this;
-		}
-
-		template <convertible_to_compile_time_array_c source_container_t>
-		requires implicitly_convertible_to_x_type_c<container_element_t<source_container_t>, element_t> &&
-		(source_container_t::length == length)
-		consteval array_container_t& operator=(const source_container_t &source) {
-			((const array_container_t*)this)->operator=(source);
-			return *this;
-		}
-
 		template <vector_convertible_to_compile_time_array_c source_vector_container_t>
-		requires implicitly_convertible_to_x_type_c<container_element_t<source_vector_container_t>, element_t> &&
-		(source_vector_container_t::capacity <= length)
-		consteval const array_container_t& operator=(const source_vector_container_t &source_vector) const {
+		requires implicitly_convertible_to_x_type_c<container_element_t<source_vector_container_t>, element_t>
+		consteval void overlay_other_container(const source_vector_container_t &source_vector_container) {
+			if (source_vector_container.length > length) {
+			report_error("moken bug detected: array_container_t::overlay_other_container called with too large source_vector_container");
+			}
 			element_t *ptr = data;
-			for (const container_element_t<source_vector_container_t> &source_element : source_vector) { *(ptr++) = source_element; }
-			return *this;
+			for (const container_element_t<source_vector_container_t> &source_element : source_vector_container) { *(ptr++) = source_element; }
 		}
 
-		template <vector_convertible_to_compile_time_array_c source_vector_container_t>
-		requires implicitly_convertible_to_x_type_c<container_element_t<source_vector_container_t>, element_t> &&
-		(source_vector_container_t::capacity <= length)
-		consteval array_container_t& operator=(const source_vector_container_t &source_vector) {
-			((const array_container_t*)this)->operator=(source_vector);
-			return *this;
+		consteval void sort(iterator_t begin, iterator_t end)
+		requires sortable_element_c<element_t>
+		{
+			if (std::greater<iterator_t>()(begin, array_container_t::end())) {
+				report_error("moken bug detected: array_container_t::sort(begin, end) called with begin past array end");
+			}
+			if (std::less<iterator_t>()(begin, array_container_t::begin())) {
+				report_error("moken bug detected: array_container_t::sort(begin, end) called with begin before array begin");
+			}
+			if (std::greater<iterator_t>()(end, array_container_t::end())) {
+				report_error("moken bug detected: array_container_t::sort(begin, end) called with end past array end");
+			}
+			if (std::less<iterator_t>()(end, array_container_t::begin())) {
+				report_error("moken bug detected: array_container_t::sort(begin, end) called with end before array begin");
+			}
+			if (begin > end) {
+				report_error("moken bug detected: array_container_t::sort(begin, end) called with begin ptr past end ptr");
+			}
+			std::sort(begin, end, [](const element_t &a, const element_t &b) consteval { return a < b; });
 		}
+
+		consteval void sort()
+		requires sortable_element_c<element_t>
+		{ return sort(begin(), end()); }
 
 		// NOTE: If you need sorted vector, add template parameter that changes the member function behavior for finding and
 		// inserting. Then you can create sorted and unsorted vectors on instantiation. Best way as far as I can see for this situation.
 		consteval loose_storage_size_t find(const element_t &target, storage_size_t begin_index, storage_size_t end_index)
 		requires equatable_element_c<element_t>
 		{
-		if (end_index >= length) { report_error("moken bug detected: array_container_t::find called with end_index >= length"); }
-		if (end_index < begin_index) { report_error("moken bug detected: array_container_t::find called with end_index < begin_index"); }
-		if (begin_index >= length) { report_error("moken bug detected: array_container_t::find called with begin_index >= length"); }
+			if (end_index > length) {
+				report_error("moken bug detected: array_container_t::find called with end_index > length");
+			}
+			if (end_index < begin_index) {
+				report_error("moken bug detected: array_container_t::find called with end_index < begin_index");
+			}
+			if (begin_index > length) {
+				report_error("moken bug detected: array_container_t::find called with begin_index > length");
+			}
 			for (storage_size_t i = begin_index; i < end_index; i++) {
 				if (target == (*this)[i]) { return i; }
 			}
@@ -311,14 +326,21 @@ namespace moken {
 		requires equatable_element_c<element_t>
 		{ return find(target, 0, length); }
 
+		template <size_t sub_array_begin_index, size_t sub_array_length>
+		requires (sub_array_begin_index < length) && (length - sub_array_begin_index >= sub_array_length)
+		consteval array_container_t<element_t, sub_array_length> sub_array() const {
+			array_container_t<element_t, sub_array_length> result;
+			for (size_t i = 0; i < sub_array_length; i++) {
+				result[i] = (*this)[i + sub_array_begin_index];
+			}
+			return result;
+		}
+
 		// NOTE: The following functions are constexpr so that you can use them from runtime as well.
 		// Useful for the table jumper algorithm that uses the table at runtime and also for debugging.
 
 		constexpr element_t& operator[](size_t index) noexcept { return data[index]; }
 		constexpr const element_t& operator[](size_t index) const noexcept { return data[index]; }
-
-		using iterator_t = element_t*;
-		using const_iterator_t = const element_t*;
 
 		constexpr iterator_t begin() noexcept { return data; }
 		constexpr const_iterator_t begin() const noexcept { return data; }
@@ -362,42 +384,18 @@ namespace moken {
 		return result;
 	}
 
-	enum class spec_type_t : bool {
-		EXTRA_NULL,
-		NO_EXTRA_NULL
-	};
-
-	template <array_container_t specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
-	requires compatible_array_container_t_c<decltype(specification_container)>
+	template <array_container_t specification>
+	requires compatible_array_container_t_c<decltype(specification)>
 	consteval void check_specification_syntax() {
-		using spec_element_t = typename decltype(specification_container)::type;
-		constexpr size_t spec_length = (
-						spec_type == spec_type_t::NO_EXTRA_NULL
-						? decltype(specification_container)::length
-						: decltype(specification_container)::length - 1
-					       );
-		// NOTE: The following line of code is a work-around for what seems to be a compiler bug.
-		// I can't write specification_container[i], clang keeps complaining that i is non-const and can't be used in a constant expression,
-		// even though this should be an exception since we're using it from inside
-		// a consteval function. I think the compiler must somehow forget the consteval-ness along the way and I think the error is a bug.
-		// Further proof is that with the following line (which just establishes a reference called "specification" to the inner array
-		// in specification_container), everything works exactly as intended.
-		// TODO: Something's fishy here, bug report this.
-		constexpr const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
-		// NOTE: constexpr const isn't something you see everyday, it makes sense here though.
-		// The constexpr applies to the reference, saying the "value" of the reference (what it points to) is constexpr.
-		// The const applies to the data that is being pointed to.
-		// "constexpr const type*" is also something that can happen.
+		using spec_element_t = typename decltype(specification)::type;
+		constexpr size_t spec_length = decltype(specification)::length;
 
 		static_assert(spec_length != 0, "moken spec syntax error: specification cannot be empty");
 
 		size_t i = 0;
 		bool is_inside_bracket_expression = false;
 
-		// NOTE: I wanted to make this consteval instead of constexpr, but for some reason (which smells strongly of a compiler bug,
-		// TODO: REPORT!!!!) consteval doesn't work, even though both versions are executed at compile-time in this case.
-		// NOTE: Removing it also works, but only because AFAIK any lambda that can be constexpr is constexpr, as per the C++ standard.
-		auto func_implementation = [&](size_t nesting_depth, const auto &self) constexpr -> void {
+		auto func_implementation = [&](size_t nesting_depth, const auto &self) consteval -> void {
 			for (; i < spec_length; i++) {
 				spec_element_t character = specification[i];
 				switch (character) {
@@ -497,24 +495,14 @@ namespace moken {
 		bool table_row[row_length];
 	};
 
-	// TODO: See if you can remove the container stuff when the stuff isn't in a lambda
-	// TODO: Instead of putting spec type through to here, just create a new specification_container in the caller and pass that,
-	// no NULL guaranteed.
-	template <array_container_t specification_container, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
-	requires compatible_array_container_t_c<decltype(specification_container)>
+	template <array_container_t specification>
+	requires compatible_array_container_t_c<decltype(specification)>
 	consteval size_t calculate_token_array_length() {
-		using spec_element_t = typename decltype(specification_container)::type;
-		// NOTE: Same work-around as above.
-		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
-		constexpr size_t spec_length = (
-						spec_type == spec_type_t::NO_EXTRA_NULL
-						? decltype(specification_container)::length
-						: decltype(specification_container)::length - 1
-					       );
+		using spec_element_t = typename decltype(specification)::type;
 
 		size_t result = 0;
 
-		for (size_t i = 0; i < spec_length; i++) {
+		for (size_t i = 0; i < decltype(specification)::length; i++) {
 			spec_element_t character = specification[i];
 
 			switch (character) {
@@ -549,21 +537,16 @@ namespace moken {
 	// TODO: You probably want to implement the ^ syntax for bracket expressions, because that is very useful.
 	// It should only change the following function, so it's not a big deal.
 
-	template <array_container_t specification_container, uint32_t table_width, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
-	requires compatible_array_container_t_c<decltype(specification_container)>
+	template <array_container_t specification, uint32_t table_width>
+	requires compatible_array_container_t_c<decltype(specification)>
 	consteval size_t parse_bracket_expression(size_t spec_index, bool (&table_row)[table_width]) {
-		using spec_element_t = typename decltype(specification_container)::type;
-		// NOTE: Same work-around as above.
-		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
-		constexpr size_t spec_length = (
-						spec_type == spec_type_t::NO_EXTRA_NULL
-						? decltype(specification_container)::length
-						: decltype(specification_container)::length - 1
-					       );
+		using spec_element_t = typename decltype(specification)::type;
 
-		auto add_character = [](bool (&table_row)[table_width], spec_element_t character) consteval {
-			bool& row_bool = table_row[character];
-			if (row_bool == true) { report_error(R"(moken spec syntax error: a character cannot be directly or indirectly specified more than once in a bracket expression ("[...]"))"); }
+		constexpr auto add_character = [](bool (&table_row)[table_width], spec_element_t character) consteval {
+			bool &row_bool = table_row[character];
+			if (row_bool == true) {
+	report_error(R"(moken spec syntax error: a character cannot be directly or indirectly specified more than once in a bracket expression ("[...]"))");
+			}
 			row_bool = true;
 		};
 
@@ -607,22 +590,15 @@ namespace moken {
 		return i;
 	}
 
-	template <array_container_t specification_container, uint32_t table_width, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
-	requires compatible_array_container_t_c<decltype(specification_container)>
+	template <array_container_t specification, uint32_t table_width>
+	requires compatible_array_container_t_c<decltype(specification)>
 	consteval auto tokenize_specification() {
-		using spec_element_t = typename decltype(specification_container)::type;
-		// NOTE: Same work-around as above.
-		const spec_element_t (&specification)[decltype(specification_container)::length] = specification_container.data;
-		constexpr size_t spec_length = (
-						spec_type == spec_type_t::NO_EXTRA_NULL
-						? decltype(specification_container)::length
-						: decltype(specification_container)::length - 1
-					       );
+		using spec_element_t = typename decltype(specification)::type;
 
 		using instanced_token_t = token_t<table_width>;
 
-		constexpr size_t token_array_length = calculate_token_array_length<specification_container, spec_type>();
-		array_container_t<instanced_token_t, token_array_length> result_container { };
+		constexpr size_t token_array_length = calculate_token_array_length<specification>();
+		array_container_t<instanced_token_t, token_array_length> result_container;
 		instanced_token_t (&result)[token_array_length] = result_container.data;
 
 		size_t token_array_index = 0;
@@ -635,7 +611,7 @@ namespace moken {
 				    ]
 				    (
 				     size_t token_array_index,
-				     const instanced_token_t& token
+				     const instanced_token_t &token
 				    )
 				    consteval
 		{
@@ -644,7 +620,7 @@ namespace moken {
 			token_array_head++;
 		};
 
-		for (size_t i = 0; i < spec_length; i++) {
+		for (size_t i = 0; i < decltype(specification)::length; i++) {
 			spec_element_t element = specification[i];
 			switch (element) {
 
@@ -693,7 +669,7 @@ namespace moken {
 
 			case '[':
 				result[token_array_index].type = token_type_t::TABLE_ROW;
-				i = parse_bracket_expression<specification_container, table_width, spec_type>(i, result[token_array_index].table_row);
+				i = parse_bracket_expression<specification, table_width>(i, result[token_array_index].table_row);
 				token_array_index++;
 				break;
 
@@ -709,9 +685,6 @@ namespace moken {
 
 			case '.':
 				result[token_array_index].type = token_type_t::TABLE_ROW;
-				// TODO: Can't do this, write not about how the assignment initializer list is a useless feature,
-				// since you can only use it for construction anyway.
-				//result[token_array_index].table_row = { true };
 				for (uint32_t i = 0; i < table_width; i++) { result[token_array_index].table_row[i] = true; }
 				token_array_index++;
 				break;
@@ -752,13 +725,10 @@ namespace moken {
 	template <typename T>
 	concept token_array_container_t_c = array_container_t_c<T> && token_t_c<typename T::type>;
 
-	template <array_container_t token_array_container>
-	requires token_array_container_t_c<decltype(token_array_container)>
+	template <array_container_t token_array>
+	requires token_array_container_t_c<decltype(token_array)>
 	consteval std::tuple<size_t, size_t, size_t, size_t> calculate_table_metrics() {
-		using instanced_token_t = typename decltype(token_array_container)::type;
-		constexpr size_t token_array_length = decltype(token_array_container)::length;
-		// NOTE: Same work-around as above.
-		const instanced_token_t (&token_array)[token_array_length] = token_array_container.data;
+		using instanced_token_t = typename decltype(token_array)::type;
 
 		size_t dfa_max_rows = 0;
 		size_t nfa_max_rows = 0;
@@ -773,7 +743,7 @@ namespace moken {
 		auto implementation = [&](const auto &self) consteval -> void {
 			size_t current_next_vector_capacity = 1;
 
-			for (; token_array_index < token_array_length; token_array_index++) {
+			for (; token_array_index < decltype(token_array)::length; token_array_index++) {
 				const instanced_token_t &token = token_array[token_array_index];
 				switch (token.type) {
 
@@ -810,7 +780,10 @@ namespace moken {
 
 		nfa_max_rows++;		// NOTE: Because of last ghost row needed for last subpath in top-level alternation set.
 
-		return { nfa_max_rows, dfa_max_rows + 50, max_next_vector_capacity, max_nested_kleene_closures };
+		dfa_max_rows++;		// NOTE: The last edge has to be able to point to a terminating state, which means we need
+					// account for that terminating state.
+
+		return { nfa_max_rows, dfa_max_rows, max_next_vector_capacity, max_nested_kleene_closures };
 	}
 
 	// NOTE: Technically, one would expect pushing onto a vector to start the lifetime of an object and
@@ -830,7 +803,20 @@ namespace moken {
 	// We can move from the internal array and turn right back around and copy a new value into the slot.
 	// Lifetime never ended, everythings good.
 
+	template <typename element_, size_t capacity_param>
+	requires (capacity_param >= 1)
+	class vector_t;
+
+	template <vector_convertible_to_compile_time_array_c source_vector_container_t>
+	vector_t(const source_vector_container_t &source_vector_container)
+		-> vector_t<container_element_t<source_vector_container_t>, source_vector_container_t::capacity>;
+
+	template <convertible_to_compile_time_array_c source_container_t>
+	vector_t(const source_container_t &source_container) -> vector_t<container_element_t<source_container_t>, source_container_t::length>;
+
+	// TODO: Make vector_t class more complete.
 	template <typename element_t, size_t capacity_param>
+	requires (capacity_param >= 1)
 	class vector_t : private array_container_t<element_t, capacity_param> {
 	public:
 		static constexpr size_t capacity = capacity_param;
@@ -855,29 +841,33 @@ namespace moken {
 
 		consteval vector_t() = default;
 
+		// NOTE: We don't need deduction guide for this case, in contrast to what array_container_t needed.
+		// This definitely points to array_container_t's behavior being a compiler bug.
+		// TODO: RESEARCH AND REPORT!!!
 		consteval vector_t(const element_t (&source_array)[capacity_param]) {
 			length = capacity;
 			for (size_t i = 0; i < length; i++) { data[i] = source_array[i]; }
 		}
 
-		consteval vector_t(const vector_t<element_t, capacity_param> &other)
-		: array_container_t<element_t, capacity>(other), length(other.length)
+		// NOTE: This doubles as the copy constructor. This makes sense in this case because you don't
+		// want to copy the entirety of a potentially huge array_container_t when you can just copy the necessary bit.
+		template <vector_convertible_to_compile_time_array_c source_vector_container_t>
+		consteval vector_t(const source_vector_container_t &source_vector_container)
+		: array_container_t<element_t, capacity>(source_vector_container), length(source_vector_container.length)
 		{ }
 
-		// TODO: Add vector_t type transmitting constructor for general containers as well.
+		template <convertible_to_compile_time_array_c source_container_t>
+		requires (source_container_t::length <= capacity)
+		consteval vector_t(const source_container_t &source_container) {
+			data.overlay_other_container(source_container);
+			length = source_container_t::length;
+		}
 
-		template <typename other_element_t, size_t other_capacity>
-		requires implicitly_convertible_to_x_type_c<other_element_t, element_t> && (other_capacity <= capacity)
-		consteval vector_t(const vector_t<other_element_t, other_capacity> &other)
-		: array_container_t<element_t, capacity>(other), length(other.length)
-		{ }
-
-		// TODO: Add vector_t type comparing constructor for general containers.
-
-		template <typename other_element_t, size_t other_capacity>
-		requires implicitly_convertible_to_x_type_c<other_element_t, element_t> && (other_capacity <= capacity)
-		consteval vector_t& operator=(const vector_t<other_element_t, other_capacity> &other) {
-			array_container_t<element_t, capacity>::operator=(other);
+		template <vector_convertible_to_compile_time_array_c source_vector_container_t>
+		requires implicitly_convertible_to_x_type_c<container_element_t<source_vector_container_t>, element_t>
+		&& (source_vector_container_t::capacity <= capacity)
+		consteval vector_t& operator=(const source_vector_container_t &other) {
+			overlay_other_container(other);
 			length = other.length;
 			return *this;
 		}
@@ -891,11 +881,10 @@ namespace moken {
 			return *this;
 		}
 
+		/*
 		template <typename other_element_t, size_t other_capacity>
-			// TODO: Think about if you want this to be a type error or a compile-time value return error situation.
-			// It's interesting that you can lower the error to the level that you want it in.
 		requires implicitly_convertible_to_x_type_c<element_t, other_element_t>
-		|| implicitly_convertible_to_x_type_c<other_element_t, element_t>
+		//|| implicitly_convertible_to_x_type_c<other_element_t, element_t>
 		// NOTE: C++20 and above assumes that a == b is true exactly when b == a is true, and as such one operator== function can supply the implementation
 		// for both a == b and b == a. Basically, the arguments are also tried in reverse order when finding an operator==.
 		// Because of this, you can get ambigiouities. For example if I left out the const at the end of the below line,
@@ -905,11 +894,23 @@ namespace moken {
 		// As far as I can tell, the only reason it's a warning and not an error is to preserve as much backwards-compatibility as possible.
 		// Preserving all of it is impossible though. This change in assumption for the == operator introduces a breaking change,
 		// which is unfortunate.
-		// TODO: Check that note is okay.
 		consteval bool operator==(const vector_t<other_element_t, other_capacity> &other) const {
 			if (length != other.length) { return false; }
 			const_iterator_t other_ptr = other.begin();
-			for (const_iterator_t ptr = begin(); ptr < end(); ptr++) {
+			for (const_iterator_t ptr = begin(); ptr < end(); ptr++, other_ptr++) {
+				if (*ptr != *other_ptr) { return false; }
+			}
+			return true;
+		}
+		*/
+
+		template <vector_convertible_to_compile_time_array_c source_vector_container_t>
+		requires implicitly_convertible_to_x_type_c<container_element_t<source_vector_container_t>, element_t>
+		|| implicitly_convertible_to_x_type_c<element_t, container_element_t<source_vector_container_t>>
+		consteval bool operator==(const source_vector_container_t &other) const {
+			if (length != other.length) { return false; }
+			const_iterator_t other_ptr = other.begin();
+			for (const_iterator_t ptr = begin(); ptr < end(); ptr++, other_ptr++) {
 				if (*ptr != *other_ptr) { return false; }
 			}
 			return true;
@@ -924,25 +925,54 @@ namespace moken {
 			return true;
 		}
 
-		// TODO: Make this accept anything that has the necessary properties.
-		// Like compatible_container or whatever we used up at the top.
-		// Make that one more general by moving the requires condition outside of it and into the usage-location in array_container_t.
-		template <size_t other_capacity>
-		consteval bool push_back(const vector_t<element_t, other_capacity> &other) {
-			for (minimum_unsigned_integral_t<other_capacity> i = 0; i < other.length; i++) {
-				if (push_back(other[i]) == false) { length -= i; return false; }
+		// TODO: Figure out the best way to also allow rvalue refs in here and then move if that happens.
+		// Two functions? I think we should try to do perfect forwarding, but we gotta make sure the const stuff still works.
+		template <vector_convertible_to_compile_time_array_c source_vector_container_t>
+		requires implicitly_convertible_to_x_type_c<container_element_t<source_vector_container_t>, element_t>
+		consteval bool push_back(const source_vector_container_t &source_vector_container) {
+			if (source_vector_container.length > capacity - length) { return false; }
+			for (const_iterator_t source_ptr = source_vector_container.begin();
+			     source_ptr < source_vector_container.end();
+			     source_ptr++)
+			{
+				if (push_back(*source_ptr) == false) {
+			report_error("moken bug detected: push_back(element) somehow failed in vector_t::push_back(source_vector_container)");
+				}
 			}
 			return true;
 		}
 
-		consteval element_t pop_back() { return std::move(data[--length]); }
-
-		consteval element_t pluck(storage_size_t index) {
-			element_t result = std::move(data[index]);	// NOTE: Can't be const since we want to be able to move from it.
-			length--;
-			for (storage_size_t i = index; i < length; i++) {
-				data[index] = data[index + 1];
+		template <convertible_to_compile_time_array_c source_container_t>
+		requires implicitly_convertible_to_x_type_c<container_element_t<source_container_t>, element_t>
+		consteval bool push_back(const source_container_t &source_container) {
+			if (source_container_t::length > capacity - length) { return false; }
+			for (const_iterator_t source_ptr = source_container.begin(); source_ptr < source_container.end(); source_ptr++) {
+				if (push_back(*source_ptr) == false) {
+				report_error("moken bug detected: push_back(element) somehow failed in vector_t::push_back(source_container)");
+				}
 			}
+			return true;
+		}
+
+		consteval element_t pop_back() {
+			if (length == 0) { report_error("moken bug detected: vector_t::pop_back failed, vector is empty"); }
+			return std::move(data[--length]);
+		}
+
+		consteval element_t pluck(iterator_t ptr) {
+			// NOTE: These functors (AFAIK) allow you to compare pointers and receive a standardized result,
+			// regardless of the geometry of the memory on the machine (or virtual machine in this case).
+			// Normal comparisons are obviously implementation defined, but these are standardized AFAIK.
+			// TODO: Also, instantiating everytime might be inefficient, so think about changing that.
+			if (std::greater_equal<iterator_t>()(ptr, end())) {
+				report_error("moken bug detected: vector_t::pluck(ptr) called with too large ptr");
+			}
+			if (std::less<iterator_t>()(ptr, begin())) {
+				report_error("moken bug detected: vector_t::pluck(ptr) called with too small ptr");
+			}
+			element_t result = std::move(*ptr);	// NOTE: Can't be const since we want to be able to move from it.
+			length--;
+			for (; ptr < end(); ptr++) { *ptr = *(ptr + 1); }
 			return result;
 			// NOTE: At compile-time: Guaranteed to be moved (at least once. I'm not sure if it sometimes can be moved more
 			// than once while returning and being received by the caller).
@@ -964,29 +994,65 @@ namespace moken {
 			// at runtime as well, but I'm not too sure. Better check the documentation to be sure.
 		}
 
+		consteval element_t pluck(storage_size_t index) {
+			if (index >= length) {
+				report_error("moken bug detected: vector_t::pluck(index) called with too large index");
+			}
+			return pluck(begin() + index);
+		}
+
 		// TODO: Add error handling and bounds checking and all that to all of these functions in this class and in others that don't
 		// have it yet.
 
-		consteval element_t pluck(iterator_t ptr) {
-			element_t result = std::move(*ptr);
-			length--;		// TODO: Something wrong here, fix.
-			for (; ptr < end(); ptr++) { *ptr = *(ptr + 1); }
-			return result;
-		}
-
 		consteval void sort()
 		requires sortable_element_c<element_t>
+		{ array_container_t<element_t, capacity>::sort(begin(), end()); }
+
+		consteval void sort(iterator_t begin, iterator_t end)
+		requires sortable_element_c<element_t>
 		{
-			std::sort(begin(), end(), [](const element_t &a, const element_t &b) consteval { return a < b; });
+			if (std::greater<iterator_t>()(begin, vector_t::end())) {
+				report_error("moken bug detected: vector_t::sort(begin, end) called with begin past vector end");
+			}
+			if (std::less<iterator_t>()(begin, vector_t::begin())) {
+				report_error("moken bug detected: vector_t::sort(begin, end) called with begin before vector begin");
+			}
+			if (std::greater<iterator_t>()(end, vector_t::end())) {
+				report_error("moken bug detected: vector_t::sort(begin, end) called with end past vector end");
+			}
+			if (std::less<iterator_t>()(end, vector_t::begin())) {
+				report_error("moken bug detected: vector_t::sort(begin, end) called with end before vector begin");
+			}
+			if (begin > end) {
+				report_error("moken bug detected: vector_t::sort(begin, end) called with begin ptr past end ptr");
+			}
+			array_container_t<element_t, capacity>::sort(begin, end);
 		}
 
-		consteval void sort_and_remove_duplicates()
+		consteval void sort_and_remove_duplicates(iterator_t begin, iterator_t end)
 		requires sortable_element_c<element_t> && equatable_element_c<element_t>
 		{
-			sort();
-			const_iterator_t previous_element_ptr = begin();
-			iterator_t ptr = begin() + 1;	// NOTE: This will always work, even for zero-length vectors in this case (cuz capacity must be >0).
-			while (ptr < end()) {
+			if (std::greater<iterator_t>()(begin, vector_t::end())) {
+			report_error("moken bug detected: vector_t::sort_and_remove_duplicates(begin, end) called with begin past vector end");
+			}
+			if (std::less<iterator_t>()(begin, vector_t::begin())) {
+			report_error("moken bug detected: vector_t::sort_and_remove_duplicates(begin, end) called with begin before vector begin");
+			}
+			if (std::greater<iterator_t>()(end, vector_t::end())) {
+			report_error("moken bug detected: vector_t::sort_and_remove_duplicates(begin, end) called with end past vector end");
+			}
+			if (std::less<iterator_t>()(end, vector_t::begin())) {
+			report_error("moken bug detected: vector_t::sort_and_remove_duplicates(begin, end) called with end before vector begin");
+			}
+			if (begin > end) {
+			report_error("moken bug detected: vector_t::sort_and_remove_duplicates(begin, end) called with begin ptr past end ptr");
+			}
+
+			sort(begin, end);
+
+			const_iterator_t previous_element_ptr = vector_t::begin();
+			iterator_t ptr = vector_t::begin() + 1;	// NOTE: This will always work because capacity must be at least 1.
+			while (ptr < vector_t::end()) {
 				if (*ptr == *previous_element_ptr) {
 					pluck(ptr);
 
@@ -1015,10 +1081,8 @@ namespace moken {
 					// P.S: Casting some integer to a pointer is UB as well if that pointer doesn't refer to an object/element.
 					// And subtracting something and then adding the same thing back to a pointer isn't gonna give you what you
 					// started with in all cases. If the pointer doesn't refer to a valid object/element for the whole time,
-					// then it's UB and anything can happen. If you subtract two valid pointers in different objects,
-					// that number doesn't have to correspond to the actual distance between them, AFAIK,
-					// all it has to satisfy is this: If you add that number to the bottom pointer, you'll get the top pointer.
-					// As I said above, the actual value for the difference is implementation defined AFAIK.
+					// then it's UB and anything can happen. Comparisons between pointers in different objects
+					// are implementation defined, obviously.
 
 					//ptr--;
 
@@ -1029,20 +1093,23 @@ namespace moken {
 			}
 		}
 
+		consteval void sort_and_remove_duplicates()
+		requires sortable_element_c<element_t> && equatable_element_c<element_t>
+		{ sort_and_remove_duplicates(begin(), end()); }
+
 		// NOTE: Same note about expanding as the one in array_container_t.
+		// TODO: Add version with iterators.
 		consteval loose_storage_size_t find(const element_t &target, size_t begin_index, size_t end_index)
 		requires equatable_element_c<element_t>
 		{
-			if (end_index >= length) { report_error("moken bug detected: vector_t::find called with end_index >= length"); }
+			if (end_index > length) { report_error("moken bug detected: vector_t::find called with end_index > length"); }
 			if (end_index < begin_index) { report_error("moken bug detected: vector_t::find called with end_index < begin_index"); }
-			if (begin_index >= length) { report_error("moken bug detected: vector_t::find called with begin_index >= length"); }
+			if (begin_index > length) { report_error("moken bug detected: vector_t::find called with begin_index > length"); }
 			return array_container_t<element_t, capacity>::find(target, begin_index, end_index);
 		}
 		consteval loose_storage_size_t find(const element_t &target)
 		requires equatable_element_c<element_t>
-		{
-			return array_container_t<element_t, capacity>::find(target, 0, length);
-		}
+		{ return find(target, 0, length); }
 
 		consteval bool is_empty() { return length == 0; }
 
@@ -1057,7 +1124,6 @@ namespace moken {
 		consteval bool push(const element_t &element) { return data.push_back(element); }
 
 		template <implicitly_convertible_to_x_type_c<element_t> other_element_t, size_t other_capacity>
-		// TODO: Move all the refs to the right side, as here, makes more sense given that int a, b, c behavior, just like for pointers.
 		consteval bool push(const stack_t<other_element_t, other_capacity> &other_stack) { return data.push_back(other_stack.pop()); }
 
 		consteval element_t pop() { return data.pop_back(); }
@@ -1101,19 +1167,15 @@ namespace moken {
 		vector_t<size_t, next_vector_capacity> next;
 	};
 
-		// TODO: research how to remove defines after header is finished. There oughta be something we can wrap the header in
-		// so that the defined defines don't leak out into whatever else.
-
-	template <array_container_t token_array_container,
+	template <array_container_t token_array,
 		  size_t table_length,
 		  size_t element_next_vector_capacity,
 		  size_t kleene_stack_capacity>
-	requires token_array_container_t_c<decltype(token_array_container)>
+	requires token_array_container_t_c<decltype(token_array)>
 	consteval auto generate_nfa_from_tokens() {
-		using instanced_token_t = typename decltype(token_array_container)::type;
-		constexpr size_t token_array_length = decltype(token_array_container)::length;
-		// TODO: Why does this compile? It shouldn't right? Since the address isn't known and you can't even use it in for a template parameter. I think this might be another compiler bug.
-		constexpr const instanced_token_t (&token_array)[token_array_length] = token_array_container.data;
+		using instanced_token_t = typename decltype(token_array)::type;
+		// NOTE: I guess template params are implicitly kept in static scope if needed, which allows constexpr refs to them.
+		//constexpr const instanced_token_t (&token_array)[token_array_length] = token_array_container.data;
 
 		constexpr uint32_t table_width = instanced_token_t::row_length;
 
@@ -1133,26 +1195,25 @@ namespace moken {
 		// The operator() can be consteval, but the instance cannot be constexpr.
 		// Obviously, if the capture is empty then you can write constexpr, because the class instance can very well be constant
 		// expression.
-		// TODO: Think about this a bit more. Does the fact that the capture variables are private inside the class matter in any way?
 
-		auto create_new_row = [&table_head]() consteval {
+		// TODO: FROM HERE
+
+		const auto create_new_row = [&table_head]() consteval {
 			if (table_head >= table_length) {
 				report_error("moken bug detected: nfa table head overflowed");
 			}
 			return table_head++;
 		};
 
-		auto register_ghost_row = [
-						     &ghost_rows,
-						     &table_head = std::as_const(table_head)
-						    ]
-						    (
-						     size_t row_number
-						    )
-						    consteval
+		const auto register_ghost_row = [
+					   &ghost_rows,
+					   &table_head = std::as_const(table_head)
+					  ]
+					  (
+					   size_t row_number
+					  )
+					  consteval
 		{
-			// TODO: Create shortcut to select last selection, or figure out how to do it, because that will come in
-			// handy when trying to indent something you just pasted.
 			if (row_number >= table_head) {
 				report_error("moken bug detected: register_ghost_row() called with out-of-bounds row_number");
 			}
@@ -1234,11 +1295,11 @@ namespace moken {
 						consteval
 						-> std::tuple<size_t, bool, size_t>
 		{
-			if (token_array_index == token_array_length) {
+			if (token_array_index == decltype(token_array)::length) {
 				register_ghost_row(current_row);
 				return { token_array_index, true, current_row };
 			}
-			if (token_array_index > token_array_length) {
+			if (token_array_index > decltype(token_array)::length) {
 				report_error("moken bug detected: token_array_index exceeded 1-past-token_array in implementation() in generate_nfa_table_from_tokens()");
 			}
 
@@ -1787,27 +1848,47 @@ namespace moken {
 		// be consistent, AFAIK. So it'll only choose between two paths if you actually use an else. Remember that.
 		if constexpr (std::get<0>(dfa_table_package) == false) {
 			report_error("RETRY REQUESTED!");
-			return convert_nfa_to_dfa_function_runner<nfa_table_package,
+			/*return convert_nfa_to_dfa_function_runner<nfa_table_package,
 			       					  table_width,
 								  dfa_table_length,
-								  possible_states_capacity * 2>();
+								  possible_states_capacity * 2>();*/
 		} else { return std::pair(std::get<1>(dfa_table_package), std::get<2>(dfa_table_package)); }
 	}
 
-	// TODO: Add check to make sure when extra null is selected that the last thing really is a NUL character.
-	// TODO: Better yet, make it select EXTRA NULL automatically when it sees a null and not when it doesn't.
-	// You can override the behavior by setting spec type explicitly I guess. Is that a good idea or is it confusing?
+	enum class spec_type_t : bool {
+		EXTRA_NULL,
+		NO_EXTRA_NULL
+	};
+
 	template <array_container_t specification, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
 	requires sufficiently_compatible_array_container_t_c<decltype(specification)>
 	consteval auto make_tokenizer_t() {
-		constexpr auto compatible_specification
-			= convert_sufficiently_compatible_array_container_to_compatible_array_container<specification>();
+		static_assert(!(spec_type == spec_type_t::EXTRA_NULL && *(specification.end() - 1) != '\0'),
+		"moken error: make_tokenizer_t called with specification that doesn't end on NUL character while spec_type = spec_type_t::EXTRA_NULL");
 
-		check_specification_syntax<compatible_specification, spec_type>();
+		constexpr auto stripped_specification = []() consteval {
+			if constexpr (spec_type == spec_type_t::EXTRA_NULL) {
+				// NOTE: The need for the template keyword here is similar to the need for the typename keyword in other
+				// situations. Without "template", a line such as this could be parsed as a boolean operation returning
+				// whether or not x < y > (z). Obviously, in this situation it's technically obvious that it cannot be properly
+				// parsed as an expression like the one I just gave, but there are situations (certain sets of params and such) where
+				// there can actually be a very real ambigiuity between being a boolean expression and being a templated member
+				// function call.
+				// So C++ decided to always assume the boolean expression case, unless otherwise instructed by means of the "template"
+				// keyword, placed as I've placed it here.
+				return specification.template sub_array<0, decltype(specification)::length - 1>();
+			} else {
+				return specification;
+			}
+		}();
+		constexpr auto compatible_stripped_specification
+			= convert_sufficiently_compatible_array_container_to_compatible_array_container<stripped_specification>();
 
-		constexpr uint32_t table_width = calculate_table_width<typename decltype(compatible_specification)::type>();
+		check_specification_syntax<compatible_stripped_specification>();
 
-		constexpr auto token_array = tokenize_specification<compatible_specification, table_width, spec_type>();
+		constexpr uint32_t table_width = calculate_table_width<typename decltype(compatible_stripped_specification)::type>();
+
+		constexpr auto token_array = tokenize_specification<compatible_stripped_specification, table_width>();
 
 		// NOTE: Doesn't work because constexpr is syntactically not allowed here, for whatever reason.
 		// Hopefully we'll get that feature in future versions of C++.
