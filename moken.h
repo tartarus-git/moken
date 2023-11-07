@@ -395,6 +395,8 @@ namespace moken {
 		size_t i = 0;
 		bool is_inside_bracket_expression = false;
 
+		size_t num_top_level_alternations = 0;
+
 		auto func_implementation = [&](size_t nesting_depth, const auto &self) consteval -> void {
 			for (; i < spec_length; i++) {
 				spec_element_t character = specification[i];
@@ -408,6 +410,7 @@ namespace moken {
 					case '|': report_error(R"(moken spec syntax error: two alternations ("|") cannot be separated by nothing)");
 					case '(': report_error(R"(moken spec syntax error: alternation ("|") cannot be preceeded by an opening parenthesis ("("))");
 					}
+					num_top_level_alternations++;
 					break;
 
 				case '*':
@@ -473,6 +476,8 @@ namespace moken {
 
 			if (is_inside_bracket_expression) { report_error(R"(moken spec syntax error: invalid bracket expression ("[...]"), no closing square bracket ("]"))"); }
 			if (nesting_depth != 0) { report_error(R"~(moken spec syntax error: invalid subexpression ("(...)"), no closing parenthesis (")"))~"); }
+			// TODO: Test this!
+			if (num_top_level_alternations + 1 > (uint16_t)-1 - 1) { report_error(R"(moken spec syntax error: too many top-level alternations ("|"))"); }
 
 		};
 		func_implementation(0, func_implementation);
@@ -1195,63 +1200,78 @@ namespace moken {
 		// The operator() can be consteval, but the instance cannot be constexpr.
 		// Obviously, if the capture is empty then you can write constexpr, because the class instance can very well be constant
 		// expression.
-
-		// TODO: FROM HERE
+		// NOTE: AFAIK, it's only the refs that have to be constexpr, not the data at which they point.
+		// That means even if operator() changes the value of a ref variable, it's not in violation of the const because
+		// the const only applies to whats actually IN the class, which is the pointer, not the value to which it points.
 
 		const auto create_new_row = [&table_head]() consteval {
-			if (table_head >= table_length) {
-				report_error("moken bug detected: nfa table head overflowed");
+			if (table_head == table_length) {
+				report_error("moken bug detected: nfa table head overflowed in create_new_row()");
+			}
+			if (table_head > table_length) {
+				report_error("moken bug detected: nfa table head somehow got past 1-past-the-end in create_new_row()");
 			}
 			return table_head++;
 		};
 
 		const auto register_ghost_row = [
-					   &ghost_rows,
-					   &table_head = std::as_const(table_head)
-					  ]
-					  (
-					   size_t row_number
-					  )
-					  consteval
+						 &ghost_rows,
+						 &table_head = std::as_const(table_head)
+						]
+						(
+						 size_t row_number
+						)
+						consteval
 		{
 			if (row_number >= table_head) {
-				report_error("moken bug detected: register_ghost_row() called with out-of-bounds row_number");
+				report_error("moken bug detected: register_ghost_row(size_t) called with out-of-bounds row_number");
 			}
 			ghost_rows[row_number] = true;
 		};
 
-		auto register_terminator = [
-						      &nfa_table,
-						      &ghost_rows = std::as_const(ghost_rows),
-						      &table_head
-						     ]
-						     (
-						      size_t row_number,
-						      uint16_t termination_handler
-						     )
-						     consteval
+		const auto register_terminator = [
+						  &nfa_table,
+						  &ghost_rows = std::as_const(ghost_rows),
+						  &table_head
+						 ]
+						 (
+						  size_t row_number,
+						  uint16_t termination_handler
+						 )
+						 consteval
 		{
 			if (row_number >= table_head) {
-				report_error("moken bug detected: register_terminator() called with out-of-bounds row_number");
+				report_error("moken bug detected: register_terminator called with out-of-bounds row_number");
 			}
 			if (ghost_rows[row_number] == false) {
-				report_error("moken bug detected: register_terminator() called for a non-ghost row");
+				report_error("moken bug detected: register_terminator called for a non-ghost row");
+			}
+			if (termination_handler == (uint16_t)-1) {
+				report_error("moken bug detected: register_terminator called with termination_handler == (uint16_t)-1");
 			}
 			nfa_table[row_number * table_width].next.clear();
 			nfa_table[row_number * table_width + 1].next.clear();
 			nfa_table[row_number * table_width + 1].next.push_back(termination_handler);
 		};
 
-		auto superimpose_table_row = [
-							&nfa_table
-						       ]
-						       (
-							size_t row_number,
-							const bool (&row)[table_width],
-							size_t target_row_number
-						       )
-						       consteval
+		const auto superimpose_table_row = [
+						    &nfa_table,
+						    &table_head = std::as_const(table_head)
+						   ]
+						   (
+						    size_t row_number,
+						    const bool (&row)[table_width],
+						    size_t target_row_number
+						   )
+						   consteval
 		{
+			if (row_number >= table_head) {
+				report_error("moken bug detected: superimpose_table_row called with out-of-bounds row_number");
+			}
+			if (target_row_number >= table_head) {
+				report_error("moken bug detected: superimpose_table_row called with out-of-bounds target_row_number");
+			}
+
 			const size_t row_offset = row_number * table_width;
 
 			for (uint32_t i = 0; i < instanced_token_t::row_length; i++) {
@@ -1264,16 +1284,24 @@ namespace moken {
 			}
 		};
 
-		auto superimpose_ghost_row = [
-							&nfa_table,
-							&ghost_rows = std::as_const(ghost_rows)
-						       ]
-						       (
-							size_t row_number,
-							size_t target_row_number
-						       )
-						       consteval
+		const auto superimpose_ghost_row = [
+						    &nfa_table,
+						    &ghost_rows = std::as_const(ghost_rows),
+						    &table_head = std::as_const(table_head)
+						   ]
+						   (
+						    size_t row_number,
+						    size_t target_row_number
+						   )
+						   consteval
 		{
+			if (row_number >= table_head) {
+				report_error("moken bug detected: superimpose_ghost_row called with out-of-bounds row_number");
+			}
+			if (target_row_number >= table_head) {
+				report_error("moken bug detected: superimpose_ghost_row called with out-of-bounds target_row_number");
+			}
+
 			const size_t row_offset = row_number * table_width;
 
 			if (ghost_rows[row_number] == false) {
@@ -1285,22 +1313,38 @@ namespace moken {
 			}
 		};
 
-		auto implementation = [&]
-						(
-						 size_t token_array_index,
-						 size_t current_row,
-						 size_t last_table_row,
-						 const auto &self
-						)
-						consteval
-						-> std::tuple<size_t, bool, size_t>
+		const auto implementation = [&]
+					    (
+					     size_t token_array_index,
+					     size_t current_row,
+					     size_t last_table_row,
+					     const auto &self
+					    )
+					    consteval
+					    -> std::tuple<size_t, bool, size_t>
 		{
 			if (token_array_index == decltype(token_array)::length) {
 				register_ghost_row(current_row);
 				return { token_array_index, true, current_row };
 			}
 			if (token_array_index > decltype(token_array)::length) {
-				report_error("moken bug detected: token_array_index exceeded 1-past-token_array in implementation() in generate_nfa_table_from_tokens()");
+	report_error("moken bug detected: token_array_index exceeded 1-past-token_array in implementation() in generate_nfa_table_from_tokens()");
+			}
+
+			if (current_row == table_head) {
+				report_error("moken bug detected: implementation called with 1-past-the-end current_row");
+			}
+			if (current_row > table_head) {
+				report_error("moken bug detected: implementation called with somehow >1-past-the-end current_row");
+			}
+
+			if (last_table_row != (size_t)-1) {
+				if (last_table_row == table_head) {
+					report_error("moken bug detected: implementation called with 1-past-the-end last_table_row");
+				}
+				if (last_table_row > table_head) {
+					report_error("moken bug detected: implementation called with >1-past-the-end last_table_row");
+				}
 			}
 
 			const instanced_token_t &token = token_array[token_array_index];
@@ -1312,7 +1356,7 @@ namespace moken {
 
 			case token_type_t::KLEENE_CLOSURE_BEGIN:
 				if (kleene_stack.push(current_row) == false) {
-					report_error("TODO: Write bug error message about how kleene stack was blown");
+					report_error("moken bug detected: kleene stack blown in implementation function");
 				}
 				return self(token_array_index + 1, current_row, last_table_row, self);
 
@@ -1344,7 +1388,7 @@ namespace moken {
 										     self);
 
 						if (branch_end_rows.push_back(returned_end_row) == false) {
-							report_error("moken bug detected: branch_end_rows capacity blown in nfa gen SUBEXPRESSION_BEGIN");
+						report_error("moken bug detected: branch_end_rows capacity blown in nfa gen SUBEXPRESSION_BEGIN");
 						}
 
 						new_token_array_index = returned_token_array_index;
@@ -1388,9 +1432,10 @@ namespace moken {
 														    -1,
 														    implementation);
 			if (branch_end_rows.push_back(returned_end_row) == false) {
-				// TODO: Check that this number doesn't exceed before-hand as form of user input validation.
-				// At this stage, it IS a bug, if it hasn't been caught already.
-				report_error("moken bug detected: top-level branch_end_rows vector length exceeded capacity while building nfa");
+				report_error("moken bug detected: top-level branch_end_rows vector length somehow exceeded capacity while building nfa");
+			}
+			if (branch_end_rows.length > (uint16_t)-1 - 1) {
+			report_error("moken bug detected: top-level branch_end_rows vector length exceeded maximum acceptable length while building nfa");
 			}
 			next_token_array_index = returned_next_token_array_index;
 			if (should_break_out) { break; }
@@ -1402,10 +1447,6 @@ namespace moken {
 
 		return std::pair(nfa_table, ghost_rows);
 	}
-
-	struct relative_dfa_table_element_t {
-		size_t next;
-	};
 
 	template <typename T>
 	class is_nfa_table_element_t {
@@ -1447,6 +1488,12 @@ namespace moken {
 
 	template <typename T, uint32_t table_width>
 	concept nfa_table_c = is_nfa_table_v<table_width, T>;
+
+	struct relative_dfa_table_element_t {
+		size_t next;
+	};
+
+	// TODO: MAKE NICE FROM HERE
 
 	template <const auto &nfa_table_package, uint32_t table_width, size_t dfa_table_length, size_t possible_states_capacity>
 	requires nfa_table_c<remove_const_and_ref_t<decltype(nfa_table_package)>, table_width>
@@ -1855,6 +1902,70 @@ namespace moken {
 		} else { return std::pair(std::get<1>(dfa_table_package), std::get<2>(dfa_table_package)); }
 	}
 
+	template <typename T>
+	class is_relative_dfa_table_element_t {
+	public:
+		static constexpr bool value = false;
+		consteval operator bool() const { return value; }
+	};
+	template <>
+	class is_relative_dfa_table_element_t<relative_dfa_table_element_t> {
+	public:
+		static constexpr bool value = true;
+		consteval operator bool() const { return value; }
+	};
+
+	template <typename T>
+	inline constexpr bool is_relative_dfa_table_element_t_v = is_relative_dfa_table_element_t<T>::value;
+
+	template <typename T>
+	concept relative_dfa_table_element_t_c = is_relative_dfa_table_element_t_v<T>;
+
+	template <typename T>
+	concept relative_dfa_table_container_c = array_container_t_c<T> && relative_dfa_table_element_t_c<typename T::type>;
+
+	template <uint32_t table_width, typename T>
+	class is_relative_dfa_table {
+	public:
+		static constexpr bool value = false;
+		consteval operator bool() const { return value; }
+	};
+	template <uint32_t table_width, relative_dfa_table_container_c relative_dfa_table_container_t>
+	class is_relative_dfa_table
+	<
+		table_width,
+		std::pair<relative_dfa_table_container_t, array_container_t<uint16_t, relative_dfa_table_container_t::length / table_width>>
+	>
+	{
+	public:
+		static constexpr bool value = true;
+		consteval operator bool() const { return value; }
+	};
+
+	template <uint32_t table_width, typename T>
+	inline constexpr bool is_relative_dfa_table_v = is_relative_dfa_table<table_width, T>::value;
+
+	template <typename T, uint32_t table_width>
+	concept relative_dfa_table_c = is_relative_dfa_table_v<table_width, T>;
+
+	/*struct absolute_dfa_table_element_t {
+		const absolute_dfa_table_element_t *next;
+	};*/
+
+	/*template <const auto &dfa_table_package, uint32_t table_width>
+	requires relative_dfa_table_c<remove_const_and_ref_t<decltype(dfa_table_package)>, table_width>
+	consteval auto absolutize_dfa(const absolute_dfa_table_element_t *base_ptr) {
+		const auto &[dfa_table, dfa_table_terminators] = dfa_table_package;
+
+		array_container_t<absolute_dfa_table_element_t, decltype(dfa_table)::length> absolute_dfa_table;
+
+		for (size_t i = 0; i < decltype(absolute_dfa_table)::length; i++) {
+			absolute_dfa_table[i].next = base_ptr + dfa_table[i].next * table_width;
+		}
+
+		return std::pair(absolute_dfa_table, dfa_table_terminators);
+	}*/
+
 	enum class spec_type_t : bool {
 		EXTRA_NULL,
 		NO_EXTRA_NULL
@@ -1927,14 +2038,17 @@ namespace moken {
 		TODO: think about that.
 		*/
 
-		constexpr auto relative_dfa_table = convert_nfa_to_dfa_function_runner<nfa_table, table_width, dfa_max_rows>();
+		static constexpr auto relative_dfa_table = convert_nfa_to_dfa_function_runner<nfa_table, table_width, dfa_max_rows>();
+		constexpr const auto &relative_dfa_table_ref = relative_dfa_table;
 
-		return relative_dfa_table;
+		// TODO: Figure out a way to make this work.
+		/*static constexpr
+			std::pair<array_container_t<absolute_dfa_table_element_t, decltype(relative_dfa_table.first)::length>,
+			remove_const_and_ref_t<decltype(relative_dfa_table.second)>>
+			absolute_dfa_table = absolutize_dfa<relative_dfa_table, table_width>(absolute_dfa_table.first.begin());
+		constexpr const auto &absolute_dfa_table_ref = absolute_dfa_table;*/
+
+		return relative_dfa_table_ref;
 	}
 
 }
-
-// TODO: We might not need the macro if we can do the finalizing in the constructor of the tokenizer_t.
-// TODO: The trick is we only do it if we can take the address of the data, which is only valid sometimes, so you're gonna need some SFINAE.
-// That way, no matter how the compiler chooses to return result from make_tokenizer_t(), we'll finalize it once and only once and we'll do it at the right time.
-#define MAKE_MOKEN_TOKENIZER_T(NAME, SPECIFICATION, ...) auto NAME = make_tokenizer_t<SPECIFICATION __VA_OPT__(,) __VA_ARGS__>(); NAME.finalize();
