@@ -1,15 +1,45 @@
-#include "moken.h"
 #include <iostream>
+#include <string>
+#include "moken.h"
 
+	bool recognized = false;
 int main() {
-	constexpr auto dfa_table = moken::make_tokenizer_t<moken::array_container_t("(hi|((bye)))*end")>();
+
+	using func_type = void (*)(size_t, size_t) noexcept;
+	constexpr func_type terminator_callbacks[] = {
+		[](size_t, size_t) noexcept {
+			recognized = true;
+		},
+       		[](size_t, size_t) noexcept { }
+	};
+
+	auto tokenizer = moken::make_tokenizer_t<moken::array_container_t("(test|test2)*"),
+		  terminator_callbacks>();
+
+	const auto &dfa_table = tokenizer.test_ref;
+
+
 	for (size_t i = 0; i < decltype(dfa_table.first)::length; i += decltype(dfa_table.first)::length / decltype(dfa_table.second)::length) {
-		//std::cout << dfa_table.second[i / (decltype(dfa_table.first)::length / decltype(dfa_table.second)::length)] << '\n';
-		for (size_t j = i; j < i + decltype(dfa_table.first)::length / decltype(dfa_table.second)::length; j++) {
+		std::cout << dfa_table.second[i / (decltype(dfa_table.first)::length / decltype(dfa_table.second)::length)] << '\n';
+		/*for (size_t j = i; j < i + decltype(dfa_table.first)::length / decltype(dfa_table.second)::length; j++) {
 			std::cout << " " << dfa_table.first[j].next << " ";
 		}
-		std::cout << '\n';
+		std::cout << '\n';*/
 	}
+
+
+
+	/*while (true) {
+		std::string input_line;
+		std::cin >> input_line;
+		for (char symbol : input_line) {
+			tokenizer.push_symbol(symbol);
+		}
+		if (recognized) {
+			std::cout << "matched!\n";
+			recognized = false;
+		}
+	}*/
 
 	/*for (auto token : token_array) {
 		switch (token.type) {

@@ -386,7 +386,7 @@ namespace moken {
 
 	template <array_container_t specification>
 	requires compatible_array_container_t_c<decltype(specification)>
-	consteval void check_specification_syntax() {
+	consteval size_t check_specification_syntax() {
 		using spec_element_t = typename decltype(specification)::type;
 		constexpr size_t spec_length = decltype(specification)::length;
 
@@ -410,7 +410,9 @@ namespace moken {
 					case '|': report_error(R"(moken spec syntax error: two alternations ("|") cannot be separated by nothing)");
 					case '(': report_error(R"(moken spec syntax error: alternation ("|") cannot be preceeded by an opening parenthesis ("("))");
 					}
-					num_top_level_alternations++;
+
+					if (nesting_depth == 0) { num_top_level_alternations++; }
+
 					break;
 
 				case '*':
@@ -477,10 +479,13 @@ namespace moken {
 			if (is_inside_bracket_expression) { report_error(R"(moken spec syntax error: invalid bracket expression ("[...]"), no closing square bracket ("]"))"); }
 			if (nesting_depth != 0) { report_error(R"~(moken spec syntax error: invalid subexpression ("(...)"), no closing parenthesis (")"))~"); }
 			// TODO: Test this!
-			if (num_top_level_alternations + 1 > (uint16_t)-1 - 1) { report_error(R"(moken spec syntax error: too many top-level alternations ("|"))"); }
+			num_top_level_alternations++;
+			if (num_top_level_alternations >= (uint16_t)-1 - 1) { report_error(R"(moken spec syntax error: too many top-level alternations ("|"), there must be fewer than 65534)"); }
 
 		};
 		func_implementation(0, func_implementation);
+
+		return num_top_level_alternations;
 	}
 
 	enum class token_type_t : uint8_t {
@@ -1966,13 +1971,85 @@ namespace moken {
 		return std::pair(absolute_dfa_table, dfa_table_terminators);
 	}*/
 
+	template <uint32_t table_width,
+	const auto &relative_dfa_table_package,
+	array_container_t terminator_callbacks>
+
+	requires relative_dfa_table_c<remove_const_and_ref_t<decltype(relative_dfa_table_package)>, table_width>
+	&& same_as_c<container_element_t<decltype(terminator_callbacks)>, void (* const)(size_t, size_t) noexcept>
+	// NOTE: We have no way of properly validating terminator_callbacks from here.
+	// Not a big deal, since this should only be constructed by moken code and hence already be validated.
+
+	class tokenizer_t {
+	public:
+		static constexpr const auto &test_ref = relative_dfa_table_package;
+
+		static constexpr const auto &relative_dfa_table = relative_dfa_table_package.first;
+		static constexpr const auto &relative_dfa_table_terminators = relative_dfa_table_package.second;
+
+		size_t current_row_index = 0;
+		uint16_t last_terminator = -1;
+
+		size_t current_stream_index = 0;
+		size_t current_token_start = 0;
+		size_t current_token_end = 0;
+
+		constexpr void push_symbol(const minimum_unsigned_integral_t<table_width - 1> &input) noexcept {
+			const relative_dfa_table_element_t &symbol_element = relative_dfa_table[current_row_index + input];
+			const uint16_t &symbol_terminator = relative_dfa_table_terminators[current_row_index];
+
+			std::cout << current_stream_index << '\n';
+			std::cout << current_token_start << '\n';
+			std::cout << current_token_end << '\n';
+			std::cout << current_row_index << '\n';
+			std::cout << '\n';
+
+			if (symbol_terminator != (uint16_t)-1) {
+				last_terminator = symbol_terminator;
+				current_token_end = current_stream_index;
+			}
+
+			if (symbol_element.next == (size_t)-1) {
+				if (last_terminator == -1) {
+					(*(terminator_callbacks.end() - 1))(current_token_start, current_stream_index);
+				}
+				else {
+					terminator_callbacks[last_terminator](current_token_start, current_token_end);
+				}
+
+				current_token_start++;
+				current_stream_index = current_token_start;
+				last_terminator = -1;
+				current_row_index = 0;
+				return;
+			}
+
+			current_row_index = symbol_element.next;
+
+			current_stream_index++;
+		}
+
+		constexpr void reset() noexcept {
+			current_row_index = 0;
+			last_terminator = -1;
+			current_stream_index = 0;
+			current_token_start = 0;
+		}
+	};
+
 	enum class spec_type_t : bool {
 		EXTRA_NULL,
 		NO_EXTRA_NULL
 	};
 
-	template <array_container_t specification, spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+	template <array_container_t specification,
+		  array_container_t terminator_callbacks,
+		  spec_type_t spec_type = spec_type_t::EXTRA_NULL>
+
 	requires sufficiently_compatible_array_container_t_c<decltype(specification)>
+	// NOTE: The inner type isn't really const, but container_element_t picks it up as const because of how it's implemented.
+	&& same_as_c<container_element_t<decltype(terminator_callbacks)>, void (*const)(size_t, size_t) noexcept>
+
 	consteval auto make_tokenizer_t() {
 		static_assert(!(spec_type == spec_type_t::EXTRA_NULL && *(specification.end() - 1) != '\0'),
 		"moken error: make_tokenizer_t called with specification that doesn't end on NUL character while spec_type = spec_type_t::EXTRA_NULL");
@@ -1995,7 +2072,15 @@ namespace moken {
 		constexpr auto compatible_stripped_specification
 			= convert_sufficiently_compatible_array_container_to_compatible_array_container<stripped_specification>();
 
-		check_specification_syntax<compatible_stripped_specification>();
+		constexpr size_t top_level_alternations = check_specification_syntax<compatible_stripped_specification>();
+
+		if (top_level_alternations == 2) {
+			report_error("TEST");
+		}
+
+		if (decltype(terminator_callbacks)::length != top_level_alternations + 1) {
+			report_error("moken spec error: terminator_callbacks length must be exactly 1 larger than the number of top-level alternations in the specification");
+		}
 
 		constexpr uint32_t table_width = calculate_table_width<typename decltype(compatible_stripped_specification)::type>();
 
@@ -2048,7 +2133,9 @@ namespace moken {
 			absolute_dfa_table = absolutize_dfa<relative_dfa_table, table_width>(absolute_dfa_table.first.begin());
 		constexpr const auto &absolute_dfa_table_ref = absolute_dfa_table;*/
 
-		return relative_dfa_table_ref;
+		constexpr tokenizer_t<table_width, relative_dfa_table_ref, terminator_callbacks> final_tokenizer;
+
+		return final_tokenizer;
 	}
 
 }
